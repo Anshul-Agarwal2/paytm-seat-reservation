@@ -17,15 +17,16 @@ import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.entity.IdempotencyKey;
 import com.example.seatreservation.entity.Reservation;
 import com.example.seatreservation.exception.IdempotencyConflictException;
-import com.example.seatreservation.exception.ShowNotFoundException;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
 import com.example.seatreservation.repository.SeatRepository;
 import com.example.seatreservation.repository.ShowRepository;
+import com.example.seatreservation.security.AuthenticatedUser;
 
 @Service
 public class ReservationServiceImpl implements ReservationService {
 
+    private final AuthenticatedUser authenticatedUser;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final ReservationRepository reservationRepository;
     private final SeatRepository seatRepository;
@@ -33,11 +34,13 @@ public class ReservationServiceImpl implements ReservationService {
     private final ReservationTransaction reservationTransaction;
 
     public ReservationServiceImpl(
+            AuthenticatedUser authenticatedUser,
             IdempotencyKeyRepository idempotencyKeyRepository,
             ReservationRepository reservationRepository,
             SeatRepository seatRepository,
             ShowRepository showRepository,
             ReservationTransaction reservationTransaction) {
+        this.authenticatedUser = authenticatedUser;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
         this.reservationRepository = reservationRepository;
         this.seatRepository = seatRepository;
@@ -46,31 +49,37 @@ public class ReservationServiceImpl implements ReservationService {
     }
 
     @Override
-    public ReservationResponse reserve(UUID showPublicId, long userId, ReserveSeatsRequest request) {
+    public ReservationResponse reserve(UUID showPublicId, ReserveSeatsRequest request) {
         String requestHash = requestHash(request.seats());
-        var show = showRepository.findByPublicId(showPublicId)
-                .orElseThrow(() -> new ShowNotFoundException(showPublicId));
-
-        var existing = idempotencyKeyRepository.findByUserIdAndShowIdAndIdempotencyKey(
-                userId, show.getId(), request.idempotencyKey());
-        if (existing.isPresent()) {
-            return replayOrConflict(existing.get(), requestHash);
-        }
-
         try {
-            return reservationTransaction.create(
-                    show.getId(), showPublicId, userId, request, requestHash);
+            return reservationTransaction.create(showPublicId, request, requestHash);
         } catch (DataIntegrityViolationException exception) {
-            var winner = idempotencyKeyRepository.findByUserIdAndShowIdAndIdempotencyKey(
-                    userId, show.getId(), request.idempotencyKey());
-            if (winner.isEmpty()) {
-                throw exception;
-            }
-            return replayOrConflict(winner.get(), requestHash);
+            return recoverIdempotencyRace(showPublicId, request, requestHash, exception);
         }
     }
 
-    private ReservationResponse replayOrConflict(IdempotencyKey idempotencyKey, String requestHash) {
+    private ReservationResponse recoverIdempotencyRace(
+            UUID showPublicId,
+            ReserveSeatsRequest request,
+            String requestHash,
+            DataIntegrityViolationException originalException) {
+        long userId = authenticatedUser.userId();
+        var show = showRepository.findByPublicId(showPublicId).orElse(null);
+        if (show == null) {
+            throw originalException;
+        }
+        var winner = idempotencyKeyRepository.findByUserIdAndShowIdAndIdempotencyKey(
+                userId, show.getId(), request.idempotencyKey());
+        if (winner.isEmpty()) {
+            throw originalException;
+        }
+        return replayOrConflict(winner.get(), requestHash, showPublicId);
+    }
+
+    private ReservationResponse replayOrConflict(
+            IdempotencyKey idempotencyKey,
+            String requestHash,
+            UUID showPublicId) {
         if (!MessageDigest.isEqual(
                 idempotencyKey.getRequestHash().getBytes(StandardCharsets.US_ASCII),
                 requestHash.getBytes(StandardCharsets.US_ASCII))) {
@@ -79,15 +88,14 @@ public class ReservationServiceImpl implements ReservationService {
         Reservation reservation = reservationRepository.findById(idempotencyKey.getReservationId())
                 .orElseThrow(() -> new IllegalStateException(
                         "Idempotency record references a missing reservation"));
-        var show = showRepository.findById(idempotencyKey.getShowId())
-                .orElseThrow(() -> new IllegalStateException(
-                        "Idempotency record references a missing show"));
         List<String> seats = seatRepository.findAllByReservationIdOrderBySeatNumberAsc(reservation.getId())
-                .stream().map(seat -> seat.getSeatNumber()).toList();
-        return response(reservation, show.getPublicId(), seats);
+                .stream()
+                .map(seat -> seat.getSeatNumber())
+                .toList();
+        return response(reservation, showPublicId, seats);
     }
 
-    static String requestHash(List<String> seatNumbers) {
+    private static String requestHash(List<String> seatNumbers) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             List<String> canonicalSeats = new ArrayList<>(seatNumbers);

@@ -19,6 +19,7 @@ import com.example.seatreservation.entity.ReservationStatus;
 import com.example.seatreservation.entity.Seat;
 import com.example.seatreservation.entity.SeatStatus;
 import com.example.seatreservation.exception.IdempotencyConflictException;
+import com.example.seatreservation.exception.PerUserLimitExceededException;
 import com.example.seatreservation.exception.SeatAlreadyTakenException;
 import com.example.seatreservation.exception.SeatNotFoundException;
 import com.example.seatreservation.exception.ShowNotFoundException;
@@ -27,10 +28,12 @@ import com.example.seatreservation.repository.ReservationRepository;
 import com.example.seatreservation.repository.ReservationSeatRepository;
 import com.example.seatreservation.repository.SeatRepository;
 import com.example.seatreservation.repository.ShowRepository;
+import com.example.seatreservation.security.AuthenticatedUser;
 
 @Service
 public class ReservationTransaction {
 
+    private final AuthenticatedUser authenticatedUser;
     private final ShowRepository showRepository;
     private final SeatRepository seatRepository;
     private final ReservationRepository reservationRepository;
@@ -38,11 +41,13 @@ public class ReservationTransaction {
     private final IdempotencyKeyRepository idempotencyKeyRepository;
 
     public ReservationTransaction(
+            AuthenticatedUser authenticatedUser,
             ShowRepository showRepository,
             SeatRepository seatRepository,
             ReservationRepository reservationRepository,
             ReservationSeatRepository reservationSeatRepository,
             IdempotencyKeyRepository idempotencyKeyRepository) {
+        this.authenticatedUser = authenticatedUser;
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
         this.reservationRepository = reservationRepository;
@@ -52,13 +57,13 @@ public class ReservationTransaction {
 
     @Transactional
     public ReservationResponse create(
-            Long showId,
             UUID showPublicId,
-            long userId,
             ReserveSeatsRequest request,
             String requestHash) {
-        var show = showRepository.findById(showId)
+        long userId = authenticatedUser.userId();
+        var show = showRepository.findByPublicIdForUpdate(showPublicId)
                 .orElseThrow(() -> new ShowNotFoundException(showPublicId));
+        Long showId = show.getId();
 
         var existing = idempotencyKeyRepository.findByUserIdAndShowIdAndIdempotencyKey(
                 userId, showId, request.idempotencyKey());
@@ -66,22 +71,24 @@ public class ReservationTransaction {
             return replayOrConflict(existing.get(), requestHash, showPublicId);
         }
 
-        List<Seat> seats = seatRepository.findAllByShowIdAndSeatNumberIn(showId, request.seats());
+        List<String> requestedSeats = request.seats().stream().sorted().toList();
+        List<Seat> seats = seatRepository.findAllByShowIdAndSeatNumberInForUpdate(
+                showId, requestedSeats);
         Map<String, Seat> seatsByNumber = seats.stream()
                 .collect(Collectors.toMap(Seat::getSeatNumber, seat -> seat));
-        for (String seatNumber : request.seats()) {
+        for (String seatNumber : requestedSeats) {
             Seat seat = seatsByNumber.get(seatNumber);
             if (seat == null) {
                 throw new SeatNotFoundException(seatNumber);
             }
             if (seat.getStatus() != SeatStatus.AVAILABLE) {
-                var winner = idempotencyKeyRepository.findByUserIdAndShowIdAndIdempotencyKey(
-                        userId, showId, request.idempotencyKey());
-                if (winner.isPresent()) {
-                    return replayOrConflict(winner.get(), requestHash, showPublicId);
-                }
                 throw new SeatAlreadyTakenException(seatNumber);
             }
+        }
+
+        long currentSeatCount = seatRepository.countReservedSeatsByShowIdAndUserId(showId, userId);
+        if (currentSeatCount + seats.size() > show.getPerUserLimit()) {
+            throw new PerUserLimitExceededException();
         }
 
         long amountPaise = Math.multiplyExact(show.getPricePaise(), (long) seats.size());
@@ -102,10 +109,7 @@ public class ReservationTransaction {
                 requestHash,
                 reservation.getId()));
 
-        return ReservationServiceImpl.response(
-                reservation,
-                showPublicId,
-                request.seats());
+        return ReservationServiceImpl.response(reservation, showPublicId, requestedSeats);
     }
 
     private ReservationResponse replayOrConflict(

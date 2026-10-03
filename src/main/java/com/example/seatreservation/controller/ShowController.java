@@ -15,7 +15,6 @@ import com.example.seatreservation.dto.ReservationResponse;
 import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.dto.ShowDetailsResponse;
 import com.example.seatreservation.dto.ShowResponse;
-import com.example.seatreservation.security.AuthenticatedUser;
 import com.example.seatreservation.service.ReservationService;
 import com.example.seatreservation.service.ShowService;
 
@@ -28,15 +27,12 @@ public class ShowController {
 
     private final ShowService showService;
     private final ReservationService reservationService;
-    private final AuthenticatedUser authenticatedUser;
 
     public ShowController(
             ShowService showService,
-            ReservationService reservationService,
-            AuthenticatedUser authenticatedUser) {
+            ReservationService reservationService) {
         this.showService = showService;
         this.reservationService = reservationService;
-        this.authenticatedUser = authenticatedUser;
     }
 
     @PostMapping
@@ -55,8 +51,7 @@ public class ShowController {
     public ResponseEntity<ReservationResponse> reserveSeats(
             @PathVariable UUID showId,
             @Valid @RequestBody ReserveSeatsRequest request) {
-        long userId = authenticatedUser.userId();
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(reservationService.reserve(showId, userId, request));
+                .body(reservationService.reserve(showId, request));
     }
 }

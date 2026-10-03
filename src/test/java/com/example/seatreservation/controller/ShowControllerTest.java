@@ -205,7 +205,7 @@ class ShowControllerTest {
     void reserveUsesJwtIdentityAndReturnsCreatedResponse() throws Exception {
         UUID showId = UUID.fromString("09bd753e-0a91-4369-b64a-c756c72db12a");
         UUID reservationId = UUID.fromString("e363228d-b06d-41e6-b4c8-9757f5f7c184");
-        when(reservationService.reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class)))
+        when(reservationService.reserve(eq(showId), any(ReserveSeatsRequest.class)))
                 .thenReturn(new ReservationResponse(
                         reservationId,
                         showId,
@@ -232,7 +232,7 @@ class ShowControllerTest {
                 .andExpect(jsonPath("$.amount_paise").value(50000))
                 .andExpect(jsonPath("$.status").value("CONFIRMED"));
 
-        verify(reservationService).reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class));
+        verify(reservationService).reserve(eq(showId), any(ReserveSeatsRequest.class));
     }
 
     @Test
@@ -255,7 +255,7 @@ class ShowControllerTest {
     @Test
     void mapsSeatNotFoundToNotFound() throws Exception {
         UUID showId = UUID.randomUUID();
-        when(reservationService.reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class)))
+        when(reservationService.reserve(eq(showId), any(ReserveSeatsRequest.class)))
                 .thenThrow(new SeatNotFoundException("A12"));
 
         mockMvc.perform(post("/shows/{showId}/reserve", showId)
@@ -281,7 +281,7 @@ class ShowControllerTest {
 
     private void assertReservationConflict(RuntimeException exception, String error) throws Exception {
         UUID showId = UUID.randomUUID();
-        when(reservationService.reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class)))
+        when(reservationService.reserve(eq(showId), any(ReserveSeatsRequest.class)))
                 .thenThrow(exception);
 
         mockMvc.perform(post("/shows/{showId}/reserve", showId)

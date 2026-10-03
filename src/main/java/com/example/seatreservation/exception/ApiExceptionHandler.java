@@ -47,13 +47,6 @@ public class ApiExceptionHandler {
         return new ApiErrorResponse(error, exception.getMessage());
     }
 
-    @ExceptionHandler(ReservationServiceNotImplementedException.class)
-    @ResponseStatus(HttpStatus.NOT_IMPLEMENTED)
-    public ApiErrorResponse handleReservationNotImplemented(
-            ReservationServiceNotImplementedException exception) {
-        return new ApiErrorResponse("RESERVATION_NOT_IMPLEMENTED", exception.getMessage());
-    }
-
     @ExceptionHandler(MethodArgumentNotValidException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiErrorResponse handleValidation(MethodArgumentNotValidException exception) {

@@ -7,5 +7,5 @@ import com.example.seatreservation.dto.ReserveSeatsRequest;
 
 public interface ReservationService {
 
-    ReservationResponse reserve(UUID showId, long authenticatedUserId, ReserveSeatsRequest request);
+    ReservationResponse reserve(UUID showId, ReserveSeatsRequest request);
 }

@@ -14,5 +14,7 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
 
     long countByShowIdAndUserId(Long showId, Long userId);
 
+    long countByShowId(Long showId);
+
     Optional<Reservation> findByPublicId(UUID publicId);
 }

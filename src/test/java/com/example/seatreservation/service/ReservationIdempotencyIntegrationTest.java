@@ -8,11 +8,14 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -22,9 +25,13 @@ import com.example.seatreservation.dto.CreateShowRequest;
 import com.example.seatreservation.dto.ReservationResponse;
 import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.exception.IdempotencyConflictException;
+import com.example.seatreservation.exception.PerUserLimitExceededException;
+import com.example.seatreservation.exception.SeatAlreadyTakenException;
+import com.example.seatreservation.entity.SeatStatus;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
 import com.example.seatreservation.repository.ShowRepository;
+import com.example.seatreservation.security.AuthenticatedUser;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @ActiveProfiles("local")
@@ -61,8 +68,8 @@ class ReservationIdempotencyIntegrationTest {
         Fixture fixture = fixture();
         ReserveSeatsRequest request = request("A1", "A2");
 
-        ReservationResponse original = reservationService.reserve(fixture.showId(), 101L, request);
-        ReservationResponse retry = reservationService.reserve(fixture.showId(), 101L, request);
+        ReservationResponse original = reserveAs(101L, fixture.showId(), request);
+        ReservationResponse retry = reserveAs(101L, fixture.showId(), request);
 
         assertThat(retry).isEqualTo(original);
         assertThat(idempotencyKeyRepository.countByUserIdAndShowIdAndIdempotencyKey(
@@ -75,10 +82,10 @@ class ReservationIdempotencyIntegrationTest {
     void sameKeyWithDifferentSeatsConflicts() {
         Fixture fixture = fixture();
         String key = UUID.randomUUID().toString();
-        reservationService.reserve(fixture.showId(), 102L, requestWithKey(key, "A1"));
+        reserveAs(102L, fixture.showId(), requestWithKey(key, "A1"));
 
         assertThatThrownBy(() ->
-                reservationService.reserve(fixture.showId(), 102L, requestWithKey(key, "A2")))
+                reserveAs(102L, fixture.showId(), requestWithKey(key, "A2")))
                 .isInstanceOf(IdempotencyConflictException.class);
         assertThat(reservationRepository.countByShowIdAndUserId(fixture.internalShowId(), 102L))
                 .isEqualTo(1);
@@ -100,7 +107,7 @@ class ReservationIdempotencyIntegrationTest {
                     if (!start.await(10, TimeUnit.SECONDS)) {
                         throw new IllegalStateException("Timed out waiting to start concurrent requests");
                     }
-                    return reservationService.reserve(fixture.showId(), 103L, request);
+                    return reserveAs(103L, fixture.showId(), request);
                 }));
             }
             assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
@@ -129,10 +136,8 @@ class ReservationIdempotencyIntegrationTest {
         Fixture fixture = fixture();
         String key = UUID.randomUUID().toString();
 
-        ReservationResponse first = reservationService.reserve(
-                fixture.showId(), 104L, requestWithKey(key, "A1"));
-        ReservationResponse second = reservationService.reserve(
-                fixture.showId(), 105L, requestWithKey(key, "A2"));
+        ReservationResponse first = reserveAs(104L, fixture.showId(), requestWithKey(key, "A1"));
+        ReservationResponse second = reserveAs(105L, fixture.showId(), requestWithKey(key, "A2"));
 
         assertThat(first.reservationId()).isNotEqualTo(second.reservationId());
         assertThat(first.userId()).isEqualTo(104L);
@@ -143,17 +148,178 @@ class ReservationIdempotencyIntegrationTest {
                 105L, fixture.internalShowId(), key)).isEqualTo(1);
     }
 
+    @Test
+    void oneOfOneHundredConcurrentRequestsCanReserveOneSeat() throws Exception {
+        Fixture fixture = fixture(100, List.of("A12"));
+        List<ReserveSeatsRequest> requests = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            requests.add(request("A12"));
+        }
+
+        List<Outcome> outcomes = concurrently(fixture.showId(), requests, 200L);
+
+        assertOneSuccessAndConflicts(outcomes, SeatAlreadyTakenException.class);
+        assertThat(reservationRepository.countByShowId(fixture.internalShowId())).isEqualTo(1);
+    }
+
+    @Test
+    void oneOfOneHundredConcurrentMultiSeatRequestsCanReserveAllSeats() throws Exception {
+        Fixture fixture = fixture(100, List.of("A1", "A2"));
+        List<ReserveSeatsRequest> requests = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            requests.add(request("A1", "A2"));
+        }
+
+        List<Outcome> outcomes = concurrently(fixture.showId(), requests, 300L);
+
+        assertOneSuccessAndConflicts(outcomes, SeatAlreadyTakenException.class);
+        assertThat(reservationRepository.countByShowId(fixture.internalShowId())).isEqualTo(1);
+    }
+
+    @Test
+    void reversedSeatInputOrderDoesNotDeadlock() throws Exception {
+        Fixture fixture = fixture(2, List.of("A1", "A2"));
+        List<Outcome> outcomes = concurrently(
+                fixture.showId(),
+                List.of(request("A1", "A2"), request("A2", "A1")),
+                400L);
+
+        assertOneSuccessAndConflicts(outcomes, SeatAlreadyTakenException.class);
+    }
+
+    @Test
+    void concurrentRequestsForSameUserCannotExceedPerUserLimit() throws Exception {
+        Fixture fixture = fixture(1, List.of("A1", "A2"));
+        List<Outcome> outcomes = concurrently(
+                fixture.showId(),
+                List.of(request("A1"), request("A2")),
+                500L,
+                true);
+
+        assertOneSuccessAndConflicts(outcomes, PerUserLimitExceededException.class);
+        assertThat(reservationRepository.countByShowIdAndUserId(fixture.internalShowId(), 500L))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void oneOfTwoUsersCompetingForSameSeatsSucceeds() throws Exception {
+        Fixture fixture = fixture(2, List.of("A1", "A2"));
+        List<Outcome> outcomes = concurrently(
+                fixture.showId(),
+                List.of(request("A1", "A2"), request("A1", "A2")),
+                600L);
+
+        assertOneSuccessAndConflicts(outcomes, SeatAlreadyTakenException.class);
+    }
+
+    @Test
+    void unavailableSeatRollsBackOtherRequestedSeats() {
+        Fixture fixture = fixture(4, List.of("A1", "A2"));
+        reserveAs(800L, fixture.showId(), request("A2"));
+
+        assertThatThrownBy(() ->
+                reserveAs(801L, fixture.showId(), request("A1", "A2")))
+                .isInstanceOf(SeatAlreadyTakenException.class);
+
+        var show = showService.getShow(fixture.showId());
+        assertThat(show.available()).isEqualTo(1);
+        assertThat(show.confirmed()).isEqualTo(1);
+        assertThat(show.seats())
+                .filteredOn(seat -> seat.seat().equals("A1"))
+                .singleElement()
+                .extracting(seat -> seat.status())
+                .isEqualTo(SeatStatus.AVAILABLE);
+    }
+
+    @Test
+    void oneHundredConcurrentRequestsFromSameUserAreSerializedAgainstLimit() throws Exception {
+        List<String> seatNumbers = new ArrayList<>();
+        List<ReserveSeatsRequest> requests = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            String seat = "S" + i;
+            seatNumbers.add(seat);
+            requests.add(request(seat));
+        }
+        Fixture fixture = fixture(100, seatNumbers);
+
+        List<Outcome> outcomes = concurrently(fixture.showId(), requests, 700L, true);
+
+        assertThat(outcomes).hasSize(100);
+        assertThat(outcomes).allSatisfy(outcome -> assertThat(outcome.failure()).isNull());
+        assertThat(reservationRepository.countByShowIdAndUserId(fixture.internalShowId(), 700L))
+                .isEqualTo(100);
+    }
+
     private Fixture fixture() {
+        return fixture(4, List.of("A1", "A2", "A3"));
+    }
+
+    private Fixture fixture(int perUserLimit, List<String> seats) {
         String suffix = UUID.randomUUID().toString();
         var response = showService.createShow(new CreateShowRequest(
                 "idempotency-" + suffix,
-                List.of("A1", "A2", "A3"),
+                seats,
                 25000L,
-                4));
+                perUserLimit));
         Long internalShowId = showRepository.findByPublicId(response.showId())
                 .orElseThrow()
                 .getId();
         return new Fixture(response.showId(), internalShowId);
+    }
+
+    private List<Outcome> concurrently(
+            UUID showId,
+            List<ReserveSeatsRequest> requests,
+            long firstUserId) throws Exception {
+        return concurrently(showId, requests, firstUserId, false);
+    }
+
+    private List<Outcome> concurrently(
+            UUID showId,
+            List<ReserveSeatsRequest> requests,
+            long firstUserId,
+            boolean sameUser) throws Exception {
+        var executor = Executors.newFixedThreadPool(requests.size());
+        CountDownLatch ready = new CountDownLatch(requests.size());
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Outcome>> futures = new ArrayList<>();
+            for (int i = 0; i < requests.size(); i++) {
+                long userId = sameUser ? firstUserId : firstUserId + i;
+                ReserveSeatsRequest request = requests.get(i);
+                futures.add(executor.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(30, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start concurrent requests");
+                    }
+                    try {
+                        return new Outcome(reserveAs(userId, showId, request), null);
+                    } catch (SeatAlreadyTakenException | PerUserLimitExceededException exception) {
+                        return new Outcome(null, exception);
+                    }
+                }));
+            }
+            assertThat(ready.await(30, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            List<Outcome> outcomes = new ArrayList<>();
+            for (Future<Outcome> future : futures) {
+                outcomes.add(future.get(120, TimeUnit.SECONDS));
+            }
+            return outcomes;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static void assertOneSuccessAndConflicts(
+            List<Outcome> outcomes,
+            Class<? extends RuntimeException> conflictType) {
+        assertThat(outcomes).hasSizeGreaterThan(1);
+        assertThat(outcomes.stream().filter(outcome -> outcome.response() != null)).hasSize(1);
+        assertThat(outcomes.stream().filter(outcome -> outcome.failure() != null))
+                .hasSize(outcomes.size() - 1)
+                .allSatisfy(outcome -> assertThat(outcome.failure()).isInstanceOf(conflictType));
     }
 
     private static ReserveSeatsRequest request(String... seats) {
@@ -164,6 +330,26 @@ class ReservationIdempotencyIntegrationTest {
         return new ReserveSeatsRequest(List.of(seats), key);
     }
 
+    private ReservationResponse reserveAs(
+            long userId,
+            UUID showId,
+            ReserveSeatsRequest request) {
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
+                new AuthenticatedUser.Principal(userId),
+                "integration-test",
+                List.of()));
+        SecurityContextHolder.setContext(context);
+        try {
+            return reservationService.reserve(showId, request);
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
     private record Fixture(UUID showId, Long internalShowId) {
+    }
+
+    private record Outcome(ReservationResponse response, RuntimeException failure) {
     }
 }

@@ -60,3 +60,8 @@ mvn "-DrunPostgresIntegrationTests=true" `
   "-Dintegration.jdbc-username=seat_reservation" `
   "-Dintegration.jdbc-password=seat_reservation_dev" test
 ```
+
+Reservations lock the show row to serialize idempotency and per-user-limit checks, then lock
+requested seat rows in sorted seat-number order. These locks and the database unique constraints
+enforce all-or-nothing reservations and return conflicts for competing requests; no external
+payment call is made inside the transaction.
