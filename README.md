@@ -65,3 +65,14 @@ Reservations lock the show row to serialize idempotency and per-user-limit check
 requested seat rows in sorted seat-number order. These locks and the database unique constraints
 enforce all-or-nothing reservations and return conflicts for competing requests; no external
 payment call is made inside the transaction.
+
+## Reservation cancellation
+
+`POST /reservations/{reservationId}/cancel` requires a Bearer token and is restricted to the
+reservation owner. Confirmed reservations can be cancelled; repeating cancellation returns the
+same `CANCELLED` response. Cancellation locks the show's row, the reservation, and its assigned
+seats in one transaction, then marks the reservation cancelled and releases only seats still
+assigned to that reservation. Reservation-seat links are retained as history independently of
+the seat's current owner, so a released seat is immediately available to another user without
+changing the prior reservation response. Pending or expired reservations are not cancellable in
+this assignment model.

@@ -32,6 +32,14 @@ public interface SeatRepository extends JpaRepository<Seat, Long> {
 
     List<Seat> findAllByReservationIdOrderBySeatNumberAsc(Long reservationId);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("""
+            select s from Seat s
+            where s.reservationId = :reservationId
+            order by s.seatNumber asc
+            """)
+    List<Seat> findAllByReservationIdForUpdate(@Param("reservationId") Long reservationId);
+
     @Query("""
             select count(s) from Seat s
             join Reservation r on r.id = s.reservationId

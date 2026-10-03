@@ -27,11 +27,14 @@ import org.springframework.test.web.servlet.MvcResult;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
 import com.example.seatreservation.dto.CreateShowRequest;
+import com.example.seatreservation.dto.CancellationResponse;
 import com.example.seatreservation.dto.ReservationResponse;
 import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.exception.IdempotencyConflictException;
 import com.example.seatreservation.exception.PerUserLimitExceededException;
+import com.example.seatreservation.exception.ReservationOwnershipException;
 import com.example.seatreservation.exception.SeatAlreadyTakenException;
+import com.example.seatreservation.entity.ReservationStatus;
 import com.example.seatreservation.entity.SeatStatus;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
@@ -51,6 +54,9 @@ class ReservationIdempotencyIntegrationTest {
 
     @Autowired
     private ReservationService reservationService;
+
+    @Autowired
+    private ReservationCancellationService cancellationService;
 
     @Autowired
     private ShowRepository showRepository;
@@ -321,6 +327,87 @@ class ReservationIdempotencyIntegrationTest {
         }
     }
 
+    @Test
+    void cancellationReleasesSeatsAndRepeatedCancellationIsIdempotent() {
+        Fixture fixture = fixture(4, List.of("A1", "A2"));
+        ReservationResponse reservation = reserveAs(901L, fixture.showId(), request("A1", "A2"));
+
+        CancellationResponse first = cancelAs(901L, reservation.reservationId());
+        CancellationResponse retry = cancelAs(901L, reservation.reservationId());
+
+        assertThat(first)
+                .isEqualTo(new CancellationResponse(reservation.reservationId(), ReservationStatus.CANCELLED));
+        assertThat(retry).isEqualTo(first);
+        var show = showService.getShow(fixture.showId());
+        assertThat(show.available()).isEqualTo(2);
+        assertThat(show.confirmed()).isZero();
+    }
+
+    @Test
+    void nonOwnerCannotCancelReservationOrReleaseItsSeats() {
+        Fixture fixture = fixture(4, List.of("A1"));
+        ReservationResponse reservation = reserveAs(902L, fixture.showId(), request("A1"));
+
+        assertThatThrownBy(() -> cancelAs(903L, reservation.reservationId()))
+                .isInstanceOf(ReservationOwnershipException.class);
+
+        var show = showService.getShow(fixture.showId());
+        assertThat(show.confirmed()).isEqualTo(1);
+        assertThat(show.available()).isZero();
+    }
+
+    @Test
+    void concurrentCancellationAndReservationNeverReassignsOldReservationSeat() throws Exception {
+        Fixture fixture = fixture(4, List.of("A1"));
+        ReservationResponse original = reserveAs(904L, fixture.showId(), request("A1"));
+        var executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<CancellationResponse> cancellation = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timed out waiting to start cancellation");
+                }
+                return cancelAs(904L, original.reservationId());
+            });
+            Future<ReservationResponse> newReservation = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timed out waiting to start reservation");
+                }
+                try {
+                    return reserveAs(905L, fixture.showId(), request("A1"));
+                } catch (SeatAlreadyTakenException exception) {
+                    return null;
+                }
+            });
+
+            assertThat(ready.await(30, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            assertThat(cancellation.get(60, TimeUnit.SECONDS).status())
+                    .isEqualTo(ReservationStatus.CANCELLED);
+            ReservationResponse replacement = newReservation.get(60, TimeUnit.SECONDS);
+
+            var seat = seatRepository.findAllByShowIdOrderBySeatNumberAsc(fixture.internalShowId())
+                    .getFirst();
+            assertThat(reservationRepository.findByPublicId(original.reservationId())
+                    .orElseThrow().getStatus()).isEqualTo(ReservationStatus.CANCELLED);
+            if (replacement == null) {
+                assertThat(seat.getStatus()).isEqualTo(SeatStatus.AVAILABLE);
+                assertThat(seat.getReservationId()).isNull();
+            } else {
+                assertThat(replacement.reservationId()).isNotEqualTo(original.reservationId());
+                assertThat(seat.getStatus()).isEqualTo(SeatStatus.CONFIRMED);
+                assertThat(seat.getReservationId()).isNotEqualTo(
+                        reservationRepository.findByPublicId(original.reservationId())
+                                .orElseThrow().getId());
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     private Fixture fixture() {
         return fixture(4, List.of("A1", "A2", "A3"));
     }
@@ -413,6 +500,20 @@ class ReservationIdempotencyIntegrationTest {
         SecurityContextHolder.setContext(context);
         try {
             return reservationService.reserve(showId, request);
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
+    private CancellationResponse cancelAs(long userId, UUID reservationId) {
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
+                new AuthenticatedUser.Principal(userId),
+                "integration-test",
+                List.of()));
+        SecurityContextHolder.setContext(context);
+        try {
+            return cancellationService.cancel(reservationId);
         } finally {
             SecurityContextHolder.clearContext();
         }

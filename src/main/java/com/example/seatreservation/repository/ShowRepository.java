@@ -19,4 +19,8 @@ public interface ShowRepository extends JpaRepository<Show, Long> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select s from Show s where s.publicId = :publicId")
     Optional<Show> findByPublicIdForUpdate(@Param("publicId") UUID publicId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select s from Show s where s.id = :showId")
+    Optional<Show> findByIdForUpdate(@Param("showId") Long showId);
 }

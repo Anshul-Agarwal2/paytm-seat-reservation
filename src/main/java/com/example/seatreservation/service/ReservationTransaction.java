@@ -126,11 +126,8 @@ public class ReservationTransaction {
         Reservation original = reservationRepository.findById(idempotencyKey.getReservationId())
                 .orElseThrow(() -> new IllegalStateException(
                         "Idempotency record references a missing reservation"));
-        List<String> originalSeats = seatRepository
-                .findAllByReservationIdOrderBySeatNumberAsc(original.getId())
-                .stream()
-                .map(Seat::getSeatNumber)
-                .toList();
+        List<String> originalSeats = reservationSeatRepository
+                .findSeatNumbersByReservationId(original.getId());
         return ReservationServiceImpl.response(original, showPublicId, originalSeats);
     }
 }

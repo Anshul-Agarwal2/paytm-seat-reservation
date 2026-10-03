@@ -19,6 +19,7 @@ import com.example.seatreservation.entity.Reservation;
 import com.example.seatreservation.exception.IdempotencyConflictException;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
+import com.example.seatreservation.repository.ReservationSeatRepository;
 import com.example.seatreservation.repository.SeatRepository;
 import com.example.seatreservation.repository.ShowRepository;
 import com.example.seatreservation.security.AuthenticatedUser;
@@ -29,6 +30,7 @@ public class ReservationServiceImpl implements ReservationService {
     private final AuthenticatedUser authenticatedUser;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final ReservationRepository reservationRepository;
+    private final ReservationSeatRepository reservationSeatRepository;
     private final SeatRepository seatRepository;
     private final ShowRepository showRepository;
     private final ReservationTransaction reservationTransaction;
@@ -37,12 +39,14 @@ public class ReservationServiceImpl implements ReservationService {
             AuthenticatedUser authenticatedUser,
             IdempotencyKeyRepository idempotencyKeyRepository,
             ReservationRepository reservationRepository,
+            ReservationSeatRepository reservationSeatRepository,
             SeatRepository seatRepository,
             ShowRepository showRepository,
             ReservationTransaction reservationTransaction) {
         this.authenticatedUser = authenticatedUser;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
         this.reservationRepository = reservationRepository;
+        this.reservationSeatRepository = reservationSeatRepository;
         this.seatRepository = seatRepository;
         this.showRepository = showRepository;
         this.reservationTransaction = reservationTransaction;
@@ -88,10 +92,7 @@ public class ReservationServiceImpl implements ReservationService {
         Reservation reservation = reservationRepository.findById(idempotencyKey.getReservationId())
                 .orElseThrow(() -> new IllegalStateException(
                         "Idempotency record references a missing reservation"));
-        List<String> seats = seatRepository.findAllByReservationIdOrderBySeatNumberAsc(reservation.getId())
-                .stream()
-                .map(seat -> seat.getSeatNumber())
-                .toList();
+        List<String> seats = reservationSeatRepository.findSeatNumbersByReservationId(reservation.getId());
         return response(reservation, showPublicId, seats);
     }
 

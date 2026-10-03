@@ -21,6 +21,18 @@ public class ApiExceptionHandler {
         return new ApiErrorResponse("SHOW_NOT_FOUND", exception.getMessage());
     }
 
+    @ExceptionHandler(ReservationNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiErrorResponse handleReservationNotFound(ReservationNotFoundException exception) {
+        return new ApiErrorResponse("RESERVATION_NOT_FOUND", exception.getMessage());
+    }
+
+    @ExceptionHandler(ReservationOwnershipException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public ApiErrorResponse handleReservationOwnership(ReservationOwnershipException exception) {
+        return new ApiErrorResponse("RESERVATION_FORBIDDEN", exception.getMessage());
+    }
+
     @ExceptionHandler(SeatNotFoundException.class)
     @ResponseStatus(HttpStatus.NOT_FOUND)
     public ApiErrorResponse handleSeatNotFound(SeatNotFoundException exception) {
@@ -30,7 +42,8 @@ public class ApiExceptionHandler {
     @ExceptionHandler({
             SeatAlreadyTakenException.class,
             PerUserLimitExceededException.class,
-            IdempotencyConflictException.class
+            IdempotencyConflictException.class,
+            ReservationNotCancellableException.class
     })
     @ResponseStatus(HttpStatus.CONFLICT)
     public ApiErrorResponse handleReservationConflict(RuntimeException exception) {
@@ -41,6 +54,8 @@ public class ApiExceptionHandler {
             error = "PER_USER_LIMIT_EXCEEDED";
         } else if (exception instanceof IdempotencyConflictException) {
             error = "IDEMPOTENCY_CONFLICT";
+        } else if (exception instanceof ReservationNotCancellableException) {
+            error = "RESERVATION_NOT_CANCELLABLE";
         } else {
             throw new IllegalStateException("Unexpected reservation conflict", exception);
         }
