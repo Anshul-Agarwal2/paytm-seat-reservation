@@ -48,3 +48,15 @@ that profile. Request a test token with `POST http://localhost:8080/dev/tokens` 
 `{"user_id": 123, "role": "USER"}` (use `ADMIN` for creating shows). Send the returned
 `access_token` on protected requests as `Authorization: Bearer <token>`. The local signing
 secret is for development only; configure a strong `JWT_SECRET` outside local development.
+
+## PostgreSQL idempotency integration tests
+
+With the local PostgreSQL service running, execute the integration cases for repeated requests,
+different request bodies, concurrent same-key requests, and keys reused by different users:
+
+```powershell
+mvn "-DrunPostgresIntegrationTests=true" `
+  "-Dintegration.jdbc-url=jdbc:postgresql://localhost:5433/seat_reservation" `
+  "-Dintegration.jdbc-username=seat_reservation" `
+  "-Dintegration.jdbc-password=seat_reservation_dev" test
+```

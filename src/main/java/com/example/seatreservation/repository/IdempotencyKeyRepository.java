@@ -12,4 +12,6 @@ public interface IdempotencyKeyRepository extends JpaRepository<IdempotencyKey, 
             Long userId,
             Long showId,
             String idempotencyKey);
+
+    long countByUserIdAndShowIdAndIdempotencyKey(Long userId, Long showId, String idempotencyKey);
 }
