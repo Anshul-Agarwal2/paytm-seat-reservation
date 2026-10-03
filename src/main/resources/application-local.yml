@@ -1,0 +1,5 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5433}/${POSTGRES_DB:seat_reservation}
+    username: ${POSTGRES_USER:seat_reservation}
+    password: ${POSTGRES_PASSWORD}
