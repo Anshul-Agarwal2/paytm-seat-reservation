@@ -38,6 +38,13 @@ Prerequisites: Docker Compose, Java 21 or later, and Maven.
 
    To also remove the local database volume, run `docker compose down -v`.
 
-Flyway is enabled and uses its default migration location, `classpath:db/migration`. No
-business tables or migrations are included yet. Hibernate schema generation is set to
-`validate`, so it will not create application tables.
+Flyway is enabled and applies versioned migrations from `classpath:db/migration`. Hibernate
+schema generation is set to `validate`, so it checks the schema without creating tables.
+
+## Local JWT testing
+
+The `local` profile exposes a development-only token endpoint. It is not registered outside
+that profile. Request a test token with `POST http://localhost:8080/dev/tokens` and JSON
+`{"user_id": 123, "role": "USER"}` (use `ADMIN` for creating shows). Send the returned
+`access_token` on protected requests as `Authorization: Bearer <token>`. The local signing
+secret is for development only; configure a strong `JWT_SECRET` outside local development.

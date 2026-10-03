@@ -14,6 +14,8 @@ import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Import;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
@@ -25,9 +27,13 @@ import com.example.seatreservation.dto.ShowDetailsResponse;
 import com.example.seatreservation.dto.ShowResponse;
 import com.example.seatreservation.entity.SeatStatus;
 import com.example.seatreservation.exception.ShowNotFoundException;
+import com.example.seatreservation.security.JwtTokenUtility;
+import com.example.seatreservation.security.SecurityConfig;
 import com.example.seatreservation.service.ShowService;
 
 @WebMvcTest(ShowController.class)
+@Import({SecurityConfig.class, JwtTokenUtility.class})
+@ActiveProfiles("local")
 class ShowControllerTest {
 
     @Autowired
@@ -36,6 +42,9 @@ class ShowControllerTest {
     @MockBean
     private ShowService showService;
 
+    @Autowired
+    private JwtTokenUtility jwtTokenUtility;
+
     @Test
     void createsShowAndReturnsCreatedResponse() throws Exception {
         UUID showId = UUID.fromString("09bd753e-0a91-4369-b64a-c756c72db12a");
@@ -43,6 +52,7 @@ class ShowControllerTest {
                 new ShowResponse(showId, "friday-night", 25000L, 4, List.of("A1", "A2")));
 
         mockMvc.perform(post("/shows")
+                        .header("Authorization", adminAuthorization())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -65,6 +75,7 @@ class ShowControllerTest {
     @Test
     void rejectsDuplicateSeats() throws Exception {
         mockMvc.perform(post("/shows")
+                        .header("Authorization", adminAuthorization())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -82,6 +93,7 @@ class ShowControllerTest {
     @Test
     void rejectsMissingNameEmptySeatsAndNegativePrice() throws Exception {
         mockMvc.perform(post("/shows")
+                        .header("Authorization", adminAuthorization())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -137,5 +149,39 @@ class ShowControllerTest {
         mockMvc.perform(get("/shows/{showId}", showId))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("SHOW_NOT_FOUND"));
+    }
+
+    @Test
+    void showCreationRequiresAdminRole() throws Exception {
+        mockMvc.perform(post("/shows")
+                        .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(123L, "USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "friday-night",
+                                  "seats": ["A1"],
+                                  "price_paise": 25000
+                                }
+                                """))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(showService);
+    }
+
+    @Test
+    void reservationPathsRequireBearerAuthentication() throws Exception {
+        mockMvc.perform(get("/reservations/1"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(post("/reservations"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/reservations/1")
+                        .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(123L, "USER")))
+                .andExpect(status().isNotFound());
+    }
+
+    private String adminAuthorization() {
+        return "Bearer " + jwtTokenUtility.generateToken(456L, "ADMIN");
     }
 }
