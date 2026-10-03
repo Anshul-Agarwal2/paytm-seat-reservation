@@ -41,6 +41,16 @@ Prerequisites: Docker Compose, Java 21 or later, and Maven.
 Flyway is enabled and applies versioned migrations from `classpath:db/migration`. Hibernate
 schema generation is set to `validate`, so it checks the schema without creating tables.
 
+## Health endpoints
+
+`GET /health/live` reports whether the application process is running and does not query
+PostgreSQL. `GET /health/ready` runs a lightweight database query and returns `200` only when
+PostgreSQL is reachable; otherwise it returns `503`. Both endpoints are public.
+
+Spring Boot Actuator health checks are also enabled at `/actuator/health`, including the
+`/actuator/health/liveness` and `/actuator/health/readiness` probe groups. Readiness includes
+the PostgreSQL health indicator.
+
 ## Local JWT testing
 
 The `local` profile exposes a development-only token endpoint. It is not registered outside
