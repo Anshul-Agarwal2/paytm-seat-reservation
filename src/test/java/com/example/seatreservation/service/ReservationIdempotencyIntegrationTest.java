@@ -14,12 +14,17 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
 import com.example.seatreservation.dto.CreateShowRequest;
 import com.example.seatreservation.dto.ReservationResponse;
@@ -30,10 +35,13 @@ import com.example.seatreservation.exception.SeatAlreadyTakenException;
 import com.example.seatreservation.entity.SeatStatus;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
+import com.example.seatreservation.repository.SeatRepository;
 import com.example.seatreservation.repository.ShowRepository;
 import com.example.seatreservation.security.AuthenticatedUser;
+import com.example.seatreservation.security.JwtTokenUtility;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
+@AutoConfigureMockMvc
 @ActiveProfiles("local")
 @EnabledIfSystemProperty(named = "runPostgresIntegrationTests", matches = "true")
 class ReservationIdempotencyIntegrationTest {
@@ -52,6 +60,15 @@ class ReservationIdempotencyIntegrationTest {
 
     @Autowired
     private IdempotencyKeyRepository idempotencyKeyRepository;
+
+    @Autowired
+    private SeatRepository seatRepository;
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Autowired
+    private JwtTokenUtility jwtTokenUtility;
 
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry properties) {
@@ -248,6 +265,60 @@ class ReservationIdempotencyIntegrationTest {
         assertThat(outcomes).allSatisfy(outcome -> assertThat(outcome.failure()).isNull());
         assertThat(reservationRepository.countByShowIdAndUserId(fixture.internalShowId(), 700L))
                 .isEqualTo(100);
+    }
+
+    @Test
+    void concurrentHttpRequestsEnforceDefaultFourSeatLimitWithoutServerErrors() throws Exception {
+        List<String> seatNumbers = new ArrayList<>();
+        for (int i = 1; i <= 20; i++) {
+            seatNumbers.add("L" + i);
+        }
+        Fixture fixture = fixture(4, seatNumbers);
+        long userId = 900L;
+        String token = jwtTokenUtility.generateToken(userId, "USER");
+        int requestCount = 15;
+
+        var executor = Executors.newFixedThreadPool(requestCount);
+        CountDownLatch ready = new CountDownLatch(requestCount);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Integer>> futures = new ArrayList<>();
+            for (int i = 0; i < requestCount; i++) {
+                String seatNumber = seatNumbers.get(i);
+                String key = UUID.randomUUID().toString();
+                futures.add(executor.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(30, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start concurrent HTTP requests");
+                    }
+                    MvcResult result = mockMvc.perform(post("/shows/{showId}/reserve", fixture.showId())
+                                    .header("Authorization", "Bearer " + token)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content("""
+                                            {"seats":["%s"],"idempotency_key":"%s"}
+                                            """.formatted(seatNumber, key)))
+                            .andReturn();
+                    return result.getResponse().getStatus();
+                }));
+            }
+
+            assertThat(ready.await(30, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> future : futures) {
+                statuses.add(future.get(120, TimeUnit.SECONDS));
+            }
+
+            assertThat(statuses).hasSize(requestCount);
+            assertThat(statuses.stream().filter(status -> status == 201)).hasSize(4);
+            assertThat(statuses.stream().filter(status -> status == 409)).hasSize(requestCount - 4);
+            assertThat(statuses).allSatisfy(status -> assertThat(status).isIn(201, 409));
+            assertThat(seatRepository.countReservedSeatsByShowIdAndUserId(
+                    fixture.internalShowId(), userId)).isEqualTo(4);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private Fixture fixture() {

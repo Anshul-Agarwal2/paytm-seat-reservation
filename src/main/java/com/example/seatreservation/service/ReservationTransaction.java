@@ -61,6 +61,8 @@ public class ReservationTransaction {
             ReserveSeatsRequest request,
             String requestHash) {
         long userId = authenticatedUser.userId();
+        // This row lock serializes reservations for the show until commit. A later transaction
+        // therefore counts the earlier transaction's committed seats before checking the limit.
         var show = showRepository.findByPublicIdForUpdate(showPublicId)
                 .orElseThrow(() -> new ShowNotFoundException(showPublicId));
         Long showId = show.getId();
