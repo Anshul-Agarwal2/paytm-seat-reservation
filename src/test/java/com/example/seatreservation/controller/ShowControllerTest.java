@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -19,7 +20,11 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.example.seatreservation.dto.CreateShowRequest;
+import com.example.seatreservation.dto.SeatStateResponse;
+import com.example.seatreservation.dto.ShowDetailsResponse;
 import com.example.seatreservation.dto.ShowResponse;
+import com.example.seatreservation.entity.SeatStatus;
+import com.example.seatreservation.exception.ShowNotFoundException;
 import com.example.seatreservation.service.ShowService;
 
 @WebMvcTest(ShowController.class)
@@ -89,5 +94,48 @@ class ShowControllerTest {
                 .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"));
 
         verifyNoInteractions(showService);
+    }
+
+    @Test
+    void getsShowWithCountsAndSeatStatesWithoutCaching() throws Exception {
+        UUID showId = UUID.fromString("09bd753e-0a91-4369-b64a-c756c72db12a");
+        when(showService.getShow(showId)).thenReturn(new ShowDetailsResponse(
+                showId,
+                "friday-night",
+                25000L,
+                3,
+                2,
+                0,
+                1,
+                List.of(
+                        new SeatStateResponse("A1", SeatStatus.CONFIRMED),
+                        new SeatStateResponse("A2", SeatStatus.AVAILABLE),
+                        new SeatStateResponse("A3", SeatStatus.AVAILABLE))));
+
+        mockMvc.perform(get("/shows/{showId}", showId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.show_id").value(showId.toString()))
+                .andExpect(jsonPath("$.name").value("friday-night"))
+                .andExpect(jsonPath("$.price_paise").value(25000))
+                .andExpect(jsonPath("$.total_seats").value(3))
+                .andExpect(jsonPath("$.available").value(2))
+                .andExpect(jsonPath("$.held").value(0))
+                .andExpect(jsonPath("$.confirmed").value(1))
+                .andExpect(jsonPath("$.seats[0].seat").value("A1"))
+                .andExpect(jsonPath("$.seats[0].status").value("CONFIRMED"))
+                .andExpect(header -> org.assertj.core.api.Assertions.assertThat(
+                        header.getResponse().getHeader("Cache-Control")).contains("no-store"));
+
+        verify(showService).getShow(showId);
+    }
+
+    @Test
+    void returnsNotFoundForUnknownShow() throws Exception {
+        UUID showId = UUID.randomUUID();
+        when(showService.getShow(showId)).thenThrow(new ShowNotFoundException(showId));
+
+        mockMvc.perform(get("/shows/{showId}", showId))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("SHOW_NOT_FOUND"));
     }
 }

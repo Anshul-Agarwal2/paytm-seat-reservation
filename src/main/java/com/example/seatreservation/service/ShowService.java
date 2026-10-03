@@ -1,15 +1,20 @@
 package com.example.seatreservation.service;
 
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.example.seatreservation.dto.CreateShowRequest;
+import com.example.seatreservation.dto.SeatStateResponse;
+import com.example.seatreservation.dto.ShowDetailsResponse;
 import com.example.seatreservation.dto.ShowResponse;
 import com.example.seatreservation.entity.Seat;
+import com.example.seatreservation.entity.SeatStatus;
 import com.example.seatreservation.entity.Show;
+import com.example.seatreservation.exception.ShowNotFoundException;
 import com.example.seatreservation.repository.SeatRepository;
 import com.example.seatreservation.repository.ShowRepository;
 
@@ -45,5 +50,35 @@ public class ShowService {
                 show.getPricePaise(),
                 show.getPerUserLimit(),
                 savedSeats.stream().map(Seat::getSeatNumber).toList());
+    }
+
+    @Transactional(readOnly = true)
+    public ShowDetailsResponse getShow(UUID showId) {
+        Show show = showRepository.findByPublicId(showId)
+                .orElseThrow(() -> new ShowNotFoundException(showId));
+        List<Seat> seats = seatRepository.findAllByShowIdOrderBySeatNumberAsc(show.getId());
+
+        long available = 0;
+        long held = 0;
+        long confirmed = 0;
+        for (Seat seat : seats) {
+            switch (seat.getStatus()) {
+                case AVAILABLE -> available++;
+                case HELD -> held++;
+                case CONFIRMED -> confirmed++;
+            }
+        }
+
+        return new ShowDetailsResponse(
+                show.getPublicId(),
+                show.getName(),
+                show.getPricePaise(),
+                seats.size(),
+                available,
+                held,
+                confirmed,
+                seats.stream()
+                        .map(seat -> new SeatStateResponse(seat.getSeatNumber(), seat.getStatus()))
+                        .toList());
     }
 }

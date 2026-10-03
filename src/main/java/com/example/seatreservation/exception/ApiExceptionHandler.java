@@ -15,6 +15,12 @@ import com.example.seatreservation.dto.ApiErrorResponse;
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
+    @ExceptionHandler(ShowNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiErrorResponse handleShowNotFound(ShowNotFoundException exception) {
+        return new ApiErrorResponse("SHOW_NOT_FOUND", exception.getMessage());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiErrorResponse handleValidation(MethodArgumentNotValidException exception) {
