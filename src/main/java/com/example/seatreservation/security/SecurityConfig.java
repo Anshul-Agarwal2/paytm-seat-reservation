@@ -74,7 +74,7 @@ public class SecurityConfig {
                         .accessDeniedHandler(accessDeniedHandler))
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers(HttpMethod.POST, "/shows").hasRole("ADMIN")
-                        .requestMatchers("/reservations/**").authenticated()
+                        .requestMatchers("/reservations/**", "/shows/*/reserve").authenticated()
                         .requestMatchers("/health", "/actuator/health", "/dev/tokens").permitAll()
                         .anyRequest().permitAll())
                 .addFilterBefore(

@@ -1,6 +1,7 @@
 package com.example.seatreservation.controller;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -22,17 +23,26 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.example.seatreservation.dto.CreateShowRequest;
+import com.example.seatreservation.dto.ReservationResponse;
+import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.dto.SeatStateResponse;
 import com.example.seatreservation.dto.ShowDetailsResponse;
 import com.example.seatreservation.dto.ShowResponse;
+import com.example.seatreservation.entity.ReservationStatus;
 import com.example.seatreservation.entity.SeatStatus;
+import com.example.seatreservation.exception.IdempotencyConflictException;
+import com.example.seatreservation.exception.PerUserLimitExceededException;
+import com.example.seatreservation.exception.SeatAlreadyTakenException;
+import com.example.seatreservation.exception.SeatNotFoundException;
 import com.example.seatreservation.exception.ShowNotFoundException;
+import com.example.seatreservation.security.AuthenticatedUser;
 import com.example.seatreservation.security.JwtTokenUtility;
 import com.example.seatreservation.security.SecurityConfig;
+import com.example.seatreservation.service.ReservationService;
 import com.example.seatreservation.service.ShowService;
 
 @WebMvcTest(ShowController.class)
-@Import({SecurityConfig.class, JwtTokenUtility.class})
+@Import({SecurityConfig.class, JwtTokenUtility.class, AuthenticatedUser.class})
 @ActiveProfiles("local")
 class ShowControllerTest {
 
@@ -41,6 +51,9 @@ class ShowControllerTest {
 
     @MockBean
     private ShowService showService;
+
+    @MockBean
+    private ReservationService reservationService;
 
     @Autowired
     private JwtTokenUtility jwtTokenUtility;
@@ -176,12 +189,108 @@ class ShowControllerTest {
         mockMvc.perform(post("/reservations"))
                 .andExpect(status().isUnauthorized());
 
+        mockMvc.perform(post("/shows/{showId}/reserve", UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"seats":["A1"],"idempotency_key":"request-1"}
+                                """))
+                .andExpect(status().isUnauthorized());
+
         mockMvc.perform(get("/reservations/1")
                         .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(123L, "USER")))
                 .andExpect(status().isNotFound());
     }
 
+    @Test
+    void reserveUsesJwtIdentityAndReturnsCreatedResponse() throws Exception {
+        UUID showId = UUID.fromString("09bd753e-0a91-4369-b64a-c756c72db12a");
+        UUID reservationId = UUID.fromString("e363228d-b06d-41e6-b4c8-9757f5f7c184");
+        when(reservationService.reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class)))
+                .thenReturn(new ReservationResponse(
+                        reservationId,
+                        showId,
+                        42L,
+                        List.of("A12", "A13"),
+                        50000L,
+                        ReservationStatus.CONFIRMED));
+
+        mockMvc.perform(post("/shows/{showId}/reserve", showId)
+                        .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(42L, "USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "user_id": 999,
+                                  "seats": ["A12", "A13"],
+                                  "idempotency_key": "unique-request-key"
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.reservation_id").value(reservationId.toString()))
+                .andExpect(jsonPath("$.show_id").value(showId.toString()))
+                .andExpect(jsonPath("$.user_id").value(42))
+                .andExpect(jsonPath("$.seats[0]").value("A12"))
+                .andExpect(jsonPath("$.amount_paise").value(50000))
+                .andExpect(jsonPath("$.status").value("CONFIRMED"));
+
+        verify(reservationService).reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class));
+    }
+
+    @Test
+    void reserveRejectsInvalidRequest() throws Exception {
+        mockMvc.perform(post("/shows/{showId}/reserve", UUID.randomUUID())
+                        .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(42L, "USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "seats": ["A12", "A12"],
+                                  "idempotency_key": " "
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"));
+
+        verifyNoInteractions(reservationService);
+    }
+
+    @Test
+    void mapsSeatNotFoundToNotFound() throws Exception {
+        UUID showId = UUID.randomUUID();
+        when(reservationService.reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class)))
+                .thenThrow(new SeatNotFoundException("A12"));
+
+        mockMvc.perform(post("/shows/{showId}/reserve", showId)
+                        .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(42L, "USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"seats":["A12"],"idempotency_key":"request-1"}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("SEAT_NOT_FOUND"));
+    }
+
+    @Test
+    void mapsReservationConflictsToConflict() throws Exception {
+        assertReservationConflict(new SeatAlreadyTakenException("A12"), "SEAT_ALREADY_TAKEN");
+        assertReservationConflict(new PerUserLimitExceededException(), "PER_USER_LIMIT_EXCEEDED");
+        assertReservationConflict(new IdempotencyConflictException(), "IDEMPOTENCY_CONFLICT");
+    }
+
     private String adminAuthorization() {
         return "Bearer " + jwtTokenUtility.generateToken(456L, "ADMIN");
+    }
+
+    private void assertReservationConflict(RuntimeException exception, String error) throws Exception {
+        UUID showId = UUID.randomUUID();
+        when(reservationService.reserve(eq(showId), eq(42L), any(ReserveSeatsRequest.class)))
+                .thenThrow(exception);
+
+        mockMvc.perform(post("/shows/{showId}/reserve", showId)
+                        .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(42L, "USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"seats":["A12"],"idempotency_key":"request-1"}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value(error));
     }
 }

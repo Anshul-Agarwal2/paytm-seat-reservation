@@ -11,8 +11,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.example.seatreservation.dto.CreateShowRequest;
+import com.example.seatreservation.dto.ReservationResponse;
+import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.dto.ShowDetailsResponse;
 import com.example.seatreservation.dto.ShowResponse;
+import com.example.seatreservation.security.AuthenticatedUser;
+import com.example.seatreservation.service.ReservationService;
 import com.example.seatreservation.service.ShowService;
 
 import jakarta.validation.Valid;
@@ -23,9 +27,16 @@ import java.util.UUID;
 public class ShowController {
 
     private final ShowService showService;
+    private final ReservationService reservationService;
+    private final AuthenticatedUser authenticatedUser;
 
-    public ShowController(ShowService showService) {
+    public ShowController(
+            ShowService showService,
+            ReservationService reservationService,
+            AuthenticatedUser authenticatedUser) {
         this.showService = showService;
+        this.reservationService = reservationService;
+        this.authenticatedUser = authenticatedUser;
     }
 
     @PostMapping
@@ -38,5 +49,14 @@ public class ShowController {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
                 .body(showService.getShow(showId));
+    }
+
+    @PostMapping("/{showId}/reserve")
+    public ResponseEntity<ReservationResponse> reserveSeats(
+            @PathVariable UUID showId,
+            @Valid @RequestBody ReserveSeatsRequest request) {
+        long userId = authenticatedUser.userId();
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(reservationService.reserve(showId, userId, request));
     }
 }
