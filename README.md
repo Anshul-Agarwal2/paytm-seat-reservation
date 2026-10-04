@@ -125,6 +125,23 @@ requested seat rows in sorted seat-number order. These locks and the database un
 enforce all-or-nothing reservations and return conflicts for competing requests; no external
 payment call is made inside the transaction.
 
+## Reservation concurrency burst script
+
+Use a local or isolated test deployment with the `local` profile enabled; the script creates a
+new show and requires the development-only `POST /dev/tokens` endpoint. It creates unique test
+users and access tokens, then runs concurrent hot-seat, same-key idempotency, and single-user
+limit bursts. It checks reservation responses against final show state and exits non-zero if an
+invariant fails. The generated show remains in the database.
+
+```powershell
+python scripts/burst.py http://localhost:8080 --requests 500 --workers 100
+```
+
+`--requests` is the request count in each of the three scenarios, and must exceed the configured
+per-user limit. `--workers` controls simultaneous requests. They can also be configured through
+`BURST_REQUESTS`, `BURST_WORKERS`, `BURST_PER_USER_LIMIT`, and `BURST_TIMEOUT_SECONDS`.
+Avoid running this load generator against production.
+
 ## Reservation cancellation
 
 `POST /reservations/{reservationId}/cancel` requires a Bearer token and is restricted to the
