@@ -23,6 +23,7 @@ import com.example.seatreservation.exception.PerUserLimitExceededException;
 import com.example.seatreservation.exception.SeatAlreadyTakenException;
 import com.example.seatreservation.exception.SeatNotFoundException;
 import com.example.seatreservation.exception.ShowNotFoundException;
+import com.example.seatreservation.metrics.ReservationMetrics;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
 import com.example.seatreservation.repository.ReservationSeatRepository;
@@ -39,6 +40,7 @@ public class ReservationTransaction {
     private final ReservationRepository reservationRepository;
     private final ReservationSeatRepository reservationSeatRepository;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
+    private final ReservationMetrics reservationMetrics;
 
     public ReservationTransaction(
             AuthenticatedUser authenticatedUser,
@@ -46,13 +48,15 @@ public class ReservationTransaction {
             SeatRepository seatRepository,
             ReservationRepository reservationRepository,
             ReservationSeatRepository reservationSeatRepository,
-            IdempotencyKeyRepository idempotencyKeyRepository) {
+            IdempotencyKeyRepository idempotencyKeyRepository,
+            ReservationMetrics reservationMetrics) {
         this.authenticatedUser = authenticatedUser;
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
         this.reservationRepository = reservationRepository;
         this.reservationSeatRepository = reservationSeatRepository;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
+        this.reservationMetrics = reservationMetrics;
     }
 
     @Transactional
@@ -70,6 +74,7 @@ public class ReservationTransaction {
         var existing = idempotencyKeyRepository.findByUserIdAndShowIdAndIdempotencyKey(
                 userId, showId, request.idempotencyKey());
         if (existing.isPresent()) {
+            reservationMetrics.recordIdempotentReplayAfterCommit();
             return replayOrConflict(existing.get(), requestHash, showPublicId);
         }
 
@@ -111,6 +116,7 @@ public class ReservationTransaction {
                 requestHash,
                 reservation.getId()));
 
+        reservationMetrics.recordConfirmedAfterCommit();
         return ReservationServiceImpl.response(reservation, showPublicId, requestedSeats);
     }
 

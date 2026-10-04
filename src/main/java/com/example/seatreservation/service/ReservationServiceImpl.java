@@ -17,6 +17,7 @@ import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.entity.IdempotencyKey;
 import com.example.seatreservation.entity.Reservation;
 import com.example.seatreservation.exception.IdempotencyConflictException;
+import com.example.seatreservation.metrics.ReservationMetrics;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
 import com.example.seatreservation.repository.ReservationSeatRepository;
@@ -34,6 +35,7 @@ public class ReservationServiceImpl implements ReservationService {
     private final SeatRepository seatRepository;
     private final ShowRepository showRepository;
     private final ReservationTransaction reservationTransaction;
+    private final ReservationMetrics reservationMetrics;
 
     public ReservationServiceImpl(
             AuthenticatedUser authenticatedUser,
@@ -42,7 +44,8 @@ public class ReservationServiceImpl implements ReservationService {
             ReservationSeatRepository reservationSeatRepository,
             SeatRepository seatRepository,
             ShowRepository showRepository,
-            ReservationTransaction reservationTransaction) {
+            ReservationTransaction reservationTransaction,
+            ReservationMetrics reservationMetrics) {
         this.authenticatedUser = authenticatedUser;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
         this.reservationRepository = reservationRepository;
@@ -50,6 +53,7 @@ public class ReservationServiceImpl implements ReservationService {
         this.seatRepository = seatRepository;
         this.showRepository = showRepository;
         this.reservationTransaction = reservationTransaction;
+        this.reservationMetrics = reservationMetrics;
     }
 
     @Override
@@ -77,7 +81,9 @@ public class ReservationServiceImpl implements ReservationService {
         if (winner.isEmpty()) {
             throw originalException;
         }
-        return replayOrConflict(winner.get(), requestHash, showPublicId);
+        ReservationResponse response = replayOrConflict(winner.get(), requestHash, showPublicId);
+        reservationMetrics.recordCommittedIdempotentReplay();
+        return response;
     }
 
     private ReservationResponse replayOrConflict(

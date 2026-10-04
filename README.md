@@ -51,6 +51,16 @@ Spring Boot Actuator health checks are also enabled at `/actuator/health`, inclu
 `/actuator/health/liveness` and `/actuator/health/readiness` probe groups. Readiness includes
 the PostgreSQL health indicator.
 
+## Prometheus metrics
+
+Micrometer metrics are exposed at `GET /actuator/prometheus`. The endpoint includes
+`reservation_confirmed_total` for reservations committed to PostgreSQL and
+`reservation_declined_total` tagged by the bounded `reason` values `seat_taken`,
+`per_user_limit`, `idempotent_replay`, and `idempotency_conflict`. Confirmed reservations and
+idempotent replays are counted only after their transaction commits. The `seats_available`
+gauge queries the current database count of available seats when metrics are scraped.
+Metrics intentionally do not include user, reservation, or idempotency identifiers.
+
 ## Local JWT testing
 
 The `local` profile exposes a development-only token endpoint. It is not registered outside

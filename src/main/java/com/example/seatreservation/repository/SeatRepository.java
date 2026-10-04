@@ -18,6 +18,8 @@ public interface SeatRepository extends JpaRepository<Seat, Long> {
 
     List<Seat> findAllByShowIdOrderBySeatNumberAsc(Long showId);
 
+    long countByStatus(SeatStatus status);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""
             select s from Seat s

@@ -21,6 +21,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import com.example.seatreservation.dto.CancellationResponse;
 import com.example.seatreservation.entity.ReservationStatus;
 import com.example.seatreservation.exception.ReservationOwnershipException;
+import com.example.seatreservation.metrics.ReservationMetrics;
 import com.example.seatreservation.security.JwtTokenUtility;
 import com.example.seatreservation.security.SecurityConfig;
 import com.example.seatreservation.service.ReservationCancellationService;
@@ -38,6 +39,9 @@ class ReservationControllerTest {
 
     @MockBean
     private ReservationCancellationService cancellationService;
+
+    @MockBean
+    private ReservationMetrics reservationMetrics;
 
     @Test
     void requiresAuthenticationToCancel() throws Exception {

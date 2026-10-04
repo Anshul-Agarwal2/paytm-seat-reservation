@@ -75,7 +75,9 @@ public class SecurityConfig {
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers(HttpMethod.POST, "/shows").hasRole("ADMIN")
                         .requestMatchers("/reservations/**", "/shows/*/reserve").authenticated()
-                        .requestMatchers("/health/**", "/actuator/health/**", "/dev/tokens").permitAll()
+                        .requestMatchers(
+                                "/health/**", "/actuator/health/**", "/actuator/prometheus", "/dev/tokens")
+                        .permitAll()
                         .anyRequest().permitAll())
                 .addFilterBefore(
                         new JwtAuthenticationFilter(jwtDecoder, authenticationEntryPoint),

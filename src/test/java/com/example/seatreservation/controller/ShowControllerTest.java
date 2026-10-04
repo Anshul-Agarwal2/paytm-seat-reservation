@@ -35,6 +35,7 @@ import com.example.seatreservation.exception.PerUserLimitExceededException;
 import com.example.seatreservation.exception.SeatAlreadyTakenException;
 import com.example.seatreservation.exception.SeatNotFoundException;
 import com.example.seatreservation.exception.ShowNotFoundException;
+import com.example.seatreservation.metrics.ReservationMetrics;
 import com.example.seatreservation.security.AuthenticatedUser;
 import com.example.seatreservation.security.JwtTokenUtility;
 import com.example.seatreservation.security.SecurityConfig;
@@ -54,6 +55,9 @@ class ShowControllerTest {
 
     @MockBean
     private ReservationService reservationService;
+
+    @MockBean
+    private ReservationMetrics reservationMetrics;
 
     @Autowired
     private JwtTokenUtility jwtTokenUtility;
@@ -273,6 +277,10 @@ class ShowControllerTest {
         assertReservationConflict(new SeatAlreadyTakenException("A12"), "SEAT_ALREADY_TAKEN");
         assertReservationConflict(new PerUserLimitExceededException(), "PER_USER_LIMIT_EXCEEDED");
         assertReservationConflict(new IdempotencyConflictException(), "IDEMPOTENCY_CONFLICT");
+
+        verify(reservationMetrics).recordSeatTaken();
+        verify(reservationMetrics).recordPerUserLimit();
+        verify(reservationMetrics).recordIdempotencyConflict();
     }
 
     private String adminAuthorization() {
