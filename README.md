@@ -4,39 +4,44 @@
 
 Prerequisites: Docker Compose, Java 21 or later, and Maven.
 
-1. Create your local Compose environment file and start PostgreSQL:
+1. Create your local Compose environment file:
 
    ```powershell
    Copy-Item .env.example .env
-   docker compose up -d postgres
    ```
 
    `.env.example` contains local-only development values. Change them if needed; never use
    those values in production. Compose persists database files in the `postgres_data` volume.
 
-2. Set the same database values for the Spring Boot process and run the application:
+2. Build and start PostgreSQL and the application together:
 
    ```powershell
-   $env:POSTGRES_DB = "seat_reservation"
-   $env:POSTGRES_USER = "seat_reservation"
-   $env:POSTGRES_PASSWORD = "seat_reservation_dev"
-   $env:POSTGRES_PORT = "5433"
-   mvn spring-boot:run "-Dspring-boot.run.profiles=local"
+   docker compose up --build
    ```
 
-   The `local` profile connects to PostgreSQL on `localhost:5433` by default. Set
-   `POSTGRES_PORT=5432` in `.env` and in the application environment if you prefer the standard port.
-   `application.yml` uses
-   `DATABASE_URL`, `DATABASE_USERNAME`, and `DATABASE_PASSWORD` for other environments;
-   provide those through the deployment environment and do not commit production credentials.
+   Compose waits for PostgreSQL's `pg_isready` healthcheck before starting the app. The app
+   connects to the `postgres` service on the Compose network, retries its container start if
+   necessary, and reports healthy only after its PostgreSQL-backed readiness check succeeds.
+   PostgreSQL is published on `localhost:5433` by default and the application on
+   `http://localhost:8080` (`APP_PORT` changes the host port).
 
-3. Stop PostgreSQL when finished:
+3. Stop the application and PostgreSQL:
 
    ```powershell
    docker compose down
    ```
 
-   To also remove the local database volume, run `docker compose down -v`.
+   Database files remain in the persistent `postgres_data` volume. Remove the volume as well
+   only when you want to delete local database data:
+
+   ```powershell
+   docker compose down -v
+   ```
+
+   Keep `.env` local and untracked. It contains development-only values; provide production
+   credentials and JWT secrets through your deployment's secret manager, never in the image or
+   committed Compose files. Other application deployments use `DATABASE_URL`,
+   `DATABASE_USERNAME`, and `DATABASE_PASSWORD`.
 
 Flyway is enabled and applies versioned migrations from `classpath:db/migration`. Hibernate
 schema generation is set to `validate`, so it checks the schema without creating tables.
@@ -60,10 +65,10 @@ docker run --rm -p 8080:8080 `
   seat-reservation:local
 ```
 
-The database host must be reachable from inside the container. The image uses a minimal
-Distroless Java 21 runtime as a non-root user, exposes port 8080, and sets container-aware JVM
-heap limits. Configure orchestrator liveness and readiness probes with `/health/live` and
-`/health/ready`; PostgreSQL credentials and the JWT signing secret are supplied only at runtime.
+The database host must be reachable from inside the container. The image uses a small Java 21
+Alpine runtime as a non-root user, exposes port 8080, and sets container-aware JVM heap limits.
+Configure orchestrator liveness and readiness probes with `/health/live` and `/health/ready`;
+PostgreSQL credentials and the JWT signing secret are supplied only at runtime.
 
 ## Health endpoints
 
