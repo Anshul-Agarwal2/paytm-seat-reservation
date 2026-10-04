@@ -285,7 +285,7 @@ def main() -> int:
             for future in as_completed(token_futures)
         }
 
-    seats = ["HOT-SEAT", "RETRY-SEAT"] + [
+    seats = ["HOT-SEAT", "RETRY-SEAT", "RETRY-ALTERNATE"] + [
         f"LIMIT-{index:06d}" for index in range(args.requests)
     ]
     show_payload = {
@@ -364,6 +364,26 @@ def main() -> int:
     ]
     if len(set(map(repr, retry_responses))) != 1:
         failures.append("Idempotent retry: replay response fields differ")
+
+    changed_body_outcome = http_json(
+        args.base_url,
+        f"/shows/{show_id}/reserve",
+        method="POST",
+        payload={
+            "seats": ["RETRY-ALTERNATE"],
+            "idempotency_key": retry_key,
+        },
+        token=tokens[retry_user],
+        timeout=args.timeout,
+    )
+    all_outcomes.append(changed_body_outcome)
+    print("Same idempotency key with a different seat payload:")
+    print_distribution([changed_body_outcome])
+    if changed_body_outcome.status != 409:
+        failures.append(
+            "Same idempotency key with a different body must return HTTP 409, "
+            f"got {changed_body_outcome.status}"
+        )
 
     print(f"Per-user limit burst ({len(limit_requests)} seats requested by one user):")
     limit_outcomes = run_burst(
@@ -449,6 +469,8 @@ def main() -> int:
         failures.append(
             "Confirmed seats in show state do not match unique successful reservation seats"
         )
+    if state_by_seat.get("RETRY-ALTERNATE") != "AVAILABLE":
+        failures.append("Different-body idempotency conflict unexpectedly reserved its seat")
     if len(seat_states) != total:
         failures.append(f"Seat list has {len(seat_states)} entries but total_seats is {total}")
 
