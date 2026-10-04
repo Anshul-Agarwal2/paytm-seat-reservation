@@ -108,16 +108,16 @@ that profile. Request a test token with `POST http://localhost:8080/dev/tokens` 
 `access_token` on protected requests as `Authorization: Bearer <token>`. The local signing
 secret is for development only; configure a strong `JWT_SECRET` outside local development.
 
-## PostgreSQL idempotency integration tests
+## PostgreSQL concurrency integration tests
 
-With the local PostgreSQL service running, execute the integration cases for repeated requests,
-different request bodies, concurrent same-key requests, and keys reused by different users:
+The integration suite uses Testcontainers to start an isolated PostgreSQL 16 instance, applies
+the Flyway migrations, and exercises concurrent reservations, idempotency, per-user limits, lock
+ordering, cancellation races, and show reconciliation. Docker must be available to run these
+tests. Testcontainers disables this integration test class automatically when Docker is
+unavailable:
 
 ```powershell
-mvn "-DrunPostgresIntegrationTests=true" `
-  "-Dintegration.jdbc-url=jdbc:postgresql://localhost:5433/seat_reservation" `
-  "-Dintegration.jdbc-username=seat_reservation" `
-  "-Dintegration.jdbc-password=seat_reservation_dev" test
+mvn "-Dtest=ReservationIdempotencyIntegrationTest" test
 ```
 
 Reservations lock the show row to serialize idempotency and per-user-limit checks, then lock
@@ -129,15 +129,16 @@ payment call is made inside the transaction.
 
 Use a local or isolated test deployment with the `local` profile enabled; the script creates a
 new show and requires the development-only `POST /dev/tokens` endpoint. It creates unique test
-users and access tokens, then runs concurrent hot-seat, same-key idempotency, and single-user
-limit bursts. It checks reservation responses against final show state and exits non-zero if an
-invariant fails. The generated show remains in the database.
+users and access tokens, then runs concurrent hot-seat, same-key idempotency, single-user limit,
+overlapping multi-seat, opposite seat-order, and cancellation-race scenarios. It checks
+reservation responses against final show state and exits non-zero if an invariant fails. The
+generated show remains in the database.
 
 ```powershell
 python scripts/burst.py http://localhost:8080 --requests 500 --workers 100
 ```
 
-`--requests` is the request count in each of the three scenarios, and must exceed the configured
+`--requests` is the request count in each of the burst scenarios, and must exceed the configured
 per-user limit. `--workers` controls simultaneous requests. They can also be configured through
 `BURST_REQUESTS`, `BURST_WORKERS`, `BURST_PER_USER_LIMIT`, and `BURST_TIMEOUT_SECONDS`.
 Avoid running this load generator against production.

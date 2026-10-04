@@ -12,7 +12,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -25,6 +24,9 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 import com.example.seatreservation.dto.CreateShowRequest;
 import com.example.seatreservation.dto.CancellationResponse;
@@ -46,8 +48,12 @@ import com.example.seatreservation.security.JwtTokenUtility;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
 @ActiveProfiles("local")
-@EnabledIfSystemProperty(named = "runPostgresIntegrationTests", matches = "true")
+@Testcontainers(disabledWithoutDocker = true)
 class ReservationIdempotencyIntegrationTest {
+
+    @Container
+    private static final PostgreSQLContainer<?> POSTGRES =
+            new PostgreSQLContainer<>("postgres:16-alpine");
 
     @Autowired
     private ShowService showService;
@@ -78,12 +84,9 @@ class ReservationIdempotencyIntegrationTest {
 
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry properties) {
-        properties.add("spring.datasource.url", () -> System.getProperty(
-                "integration.jdbc-url", "jdbc:postgresql://localhost:5433/seat_reservation"));
-        properties.add("spring.datasource.username", () -> System.getProperty(
-                "integration.jdbc-username", "seat_reservation"));
-        properties.add("spring.datasource.password", () -> System.getProperty(
-                "integration.jdbc-password", "seat_reservation_dev"));
+        properties.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        properties.add("spring.datasource.username", POSTGRES::getUsername);
+        properties.add("spring.datasource.password", POSTGRES::getPassword);
     }
 
     @Test
@@ -102,7 +105,7 @@ class ReservationIdempotencyIntegrationTest {
     }
 
     @Test
-    void sameKeyWithDifferentSeatsConflicts() {
+    void sameKeyWithDifferentSeatsConflicts() throws Exception {
         Fixture fixture = fixture();
         String key = UUID.randomUUID().toString();
         reserveAs(102L, fixture.showId(), requestWithKey(key, "A1"));
@@ -110,6 +113,15 @@ class ReservationIdempotencyIntegrationTest {
         assertThatThrownBy(() ->
                 reserveAs(102L, fixture.showId(), requestWithKey(key, "A2")))
                 .isInstanceOf(IdempotencyConflictException.class);
+        assertThat(mockMvc.perform(post("/shows/{showId}/reserve", fixture.showId())
+                        .header("Authorization", "Bearer " + jwtTokenUtility.generateToken(102L, "USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"seats":["A2"],"idempotency_key":"%s"}
+                                """.formatted(key)))
+                .andReturn()
+                .getResponse()
+                .getStatus()).isEqualTo(409);
         assertThat(reservationRepository.countByShowIdAndUserId(fixture.internalShowId(), 102L))
                 .isEqualTo(1);
     }
@@ -118,7 +130,7 @@ class ReservationIdempotencyIntegrationTest {
     void concurrentSameKeyRequestsCreateOneReservation() throws Exception {
         Fixture fixture = fixture();
         ReserveSeatsRequest request = request("A1", "A2");
-        int requestCount = 8;
+        int requestCount = 50;
         var executor = Executors.newFixedThreadPool(requestCount);
         CountDownLatch ready = new CountDownLatch(requestCount);
         CountDownLatch start = new CountDownLatch(1);
@@ -236,6 +248,21 @@ class ReservationIdempotencyIntegrationTest {
     }
 
     @Test
+    void overlappingMultiSeatRequestsAreAllOrNothing() throws Exception {
+        Fixture fixture = fixture(4, List.of("A1", "A2", "A3"));
+        List<Outcome> outcomes = concurrently(
+                fixture.showId(),
+                List.of(request("A1", "A2"), request("A2", "A3")),
+                650L);
+
+        assertOneSuccessAndConflicts(outcomes, SeatAlreadyTakenException.class);
+        var show = showService.getShow(fixture.showId());
+        assertThat(show.totalSeats()).isEqualTo(3);
+        assertThat(show.available() + show.held() + show.confirmed()).isEqualTo(show.totalSeats());
+        assertThat(show.confirmed()).isEqualTo(2);
+    }
+
+    @Test
     void unavailableSeatRollsBackOtherRequestedSeats() {
         Fixture fixture = fixture(4, List.of("A1", "A2"));
         reserveAs(800L, fixture.showId(), request("A2"));
@@ -328,6 +355,56 @@ class ReservationIdempotencyIntegrationTest {
     }
 
     @Test
+    void oneHundredHttpUsersCompetingForOneSeatProduceOneSuccessAndNoServerErrors()
+            throws Exception {
+        Fixture fixture = fixture(4, List.of("HOT"));
+        int requestCount = 100;
+        var executor = Executors.newFixedThreadPool(requestCount);
+        CountDownLatch ready = new CountDownLatch(requestCount);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Integer>> futures = new ArrayList<>();
+            for (int i = 0; i < requestCount; i++) {
+                long userId = 10_000L + i;
+                String token = jwtTokenUtility.generateToken(userId, "USER");
+                String key = UUID.randomUUID().toString();
+                futures.add(executor.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(30, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start HTTP seat storm");
+                    }
+                    return mockMvc.perform(post("/shows/{showId}/reserve", fixture.showId())
+                                    .header("Authorization", "Bearer " + token)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content("""
+                                            {"seats":["HOT"],"idempotency_key":"%s"}
+                                            """.formatted(key)))
+                            .andReturn()
+                            .getResponse()
+                            .getStatus();
+                }));
+            }
+
+            assertThat(ready.await(30, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> future : futures) {
+                statuses.add(future.get(120, TimeUnit.SECONDS));
+            }
+
+            assertThat(statuses).hasSize(requestCount);
+            assertThat(statuses.stream().filter(status -> status == 201)).hasSize(1);
+            assertThat(statuses.stream().filter(status -> status == 409))
+                    .hasSize(requestCount - 1);
+            assertThat(statuses).allSatisfy(status -> assertThat(status).isIn(201, 409));
+            assertThat(reservationRepository.countByShowId(fixture.internalShowId())).isEqualTo(1);
+            assertShowReconciles(fixture.showId());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void cancellationReleasesSeatsAndRepeatedCancellationIsIdempotent() {
         Fixture fixture = fixture(4, List.of("A1", "A2"));
         ReservationResponse reservation = reserveAs(901L, fixture.showId(), request("A1", "A2"));
@@ -406,6 +483,24 @@ class ReservationIdempotencyIntegrationTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void showCountsReconcileAfterConcurrentReservations() throws Exception {
+        Fixture fixture = fixture(4, List.of("A1", "A2", "A3", "A4"));
+        List<Outcome> outcomes = concurrently(
+                fixture.showId(),
+                List.of(request("A1"), request("A2"), request("A3"), request("A4")),
+                950L);
+
+        assertThat(outcomes).allSatisfy(outcome -> assertThat(outcome.failure()).isNull());
+        assertShowReconciles(fixture.showId());
+    }
+
+    private void assertShowReconciles(UUID showId) {
+        var show = showService.getShow(showId);
+        assertThat(show.available() + show.held() + show.confirmed()).isEqualTo(show.totalSeats());
+        assertThat(show.seats()).hasSize((int) show.totalSeats());
     }
 
     private Fixture fixture() {

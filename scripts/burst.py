@@ -151,17 +151,18 @@ def reserve(
     base_url: str,
     show_id: str,
     token: str,
-    seat: str,
+    seats: str | list[str],
     idempotency_key: str,
     timeout: float,
     start: threading.Event,
 ) -> Outcome:
     start.wait()
+    requested_seats = [seats] if isinstance(seats, str) else seats
     return http_json(
         base_url,
         f"/shows/{show_id}/reserve",
         method="POST",
-        payload={"seats": [seat], "idempotency_key": idempotency_key},
+        payload={"seats": requested_seats, "idempotency_key": idempotency_key},
         token=token,
         timeout=timeout,
     )
@@ -170,7 +171,7 @@ def reserve(
 def run_burst(
     base_url: str,
     show_id: str,
-    requests: list[tuple[str, str, str]],
+    requests: list[tuple[str, str | list[str], str]],
     *,
     workers: int,
     timeout: float,
@@ -194,11 +195,63 @@ def run_burst(
         return [future.result() for future in as_completed(futures)]
 
 
+def cancel_reservation(
+    base_url: str,
+    reservation_id: str,
+    token: str,
+    timeout: float,
+    start: threading.Event,
+) -> Outcome:
+    start.wait()
+    return http_json(
+        base_url,
+        f"/reservations/{reservation_id}/cancel",
+        method="POST",
+        token=token,
+        timeout=timeout,
+    )
+
+
+def run_cancel_reservation_race(
+    base_url: str,
+    show_id: str,
+    reservation_id: str,
+    owner_token: str,
+    competitor_token: str,
+    seat: str,
+    timeout: float,
+) -> tuple[Outcome, Outcome]:
+    start = threading.Event()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cancellation = executor.submit(
+            cancel_reservation,
+            base_url,
+            reservation_id,
+            owner_token,
+            timeout,
+            start,
+        )
+        competing_reservation = executor.submit(
+            reserve,
+            base_url,
+            show_id,
+            competitor_token,
+            seat,
+            f"cancel-race-{uuid.uuid4()}",
+            timeout,
+            start,
+        )
+        start.set()
+        return cancellation.result(), competing_reservation.result()
+
+
 def outcome_counts(outcomes: list[Outcome]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for outcome in outcomes:
         if outcome.status is None:
             counts["transport_error"] += 1
+        elif outcome.status == 200:
+            counts["200"] += 1
         elif outcome.status == 201:
             counts["201"] += 1
         elif outcome.status == 409:
@@ -218,7 +271,7 @@ def print_distribution(outcomes: list[Outcome]) -> None:
         "  "
         + ", ".join(
             f"{label}={counts.get(label, 0)}"
-            for label in ("201", "409", "other_4xx", "5xx", "transport_error", "other")
+            for label in ("200", "201", "409", "other_4xx", "5xx", "transport_error", "other")
         )
         + f" (4xx total={counts.get('409', 0) + counts.get('other_4xx', 0)})"
     )
@@ -266,7 +319,16 @@ def main() -> int:
     hot_users = [unique_user_id(used_user_ids) for _ in range(args.requests)]
     retry_user = unique_user_id(used_user_ids)
     limited_user = unique_user_id(used_user_ids)
-    all_user_ids = hot_users + [retry_user, limited_user]
+    overlap_users = [unique_user_id(used_user_ids) for _ in range(2)]
+    order_users = [unique_user_id(used_user_ids) for _ in range(2)]
+    cancellation_owner = unique_user_id(used_user_ids)
+    cancellation_competitor = unique_user_id(used_user_ids)
+    all_user_ids = (
+        hot_users
+        + [retry_user, limited_user, cancellation_owner, cancellation_competitor]
+        + overlap_users
+        + order_users
+    )
 
     print(f"Generating {len(all_user_ids)} unique USER tokens...")
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -285,8 +347,17 @@ def main() -> int:
             for future in as_completed(token_futures)
         }
 
-    seats = ["HOT-SEAT", "RETRY-SEAT", "RETRY-ALTERNATE"] + [
-        f"LIMIT-{index:06d}" for index in range(args.requests)
+    seats = [
+        "HOT-SEAT",
+        "RETRY-SEAT",
+        "RETRY-ALTERNATE",
+        "OVERLAP-A",
+        "OVERLAP-B",
+        "OVERLAP-C",
+        "ORDER-A",
+        "ORDER-B",
+        "CANCEL-SEAT",
+        *[f"LIMIT-{index:06d}" for index in range(args.requests)],
     ]
     show_payload = {
         "name": f"burst-{uuid.uuid4()}",
@@ -404,6 +475,136 @@ def main() -> int:
             f"got {len(limit_successes)}"
         )
 
+    overlapping_requests = [
+        (
+            tokens[overlap_users[0]],
+            ["OVERLAP-A", "OVERLAP-B"],
+            f"overlap-{uuid.uuid4()}",
+        ),
+        (
+            tokens[overlap_users[1]],
+            ["OVERLAP-B", "OVERLAP-C"],
+            f"overlap-{uuid.uuid4()}",
+        ),
+    ]
+    print("Overlapping multi-seat requests:")
+    overlapping_outcomes = run_burst(
+        args.base_url,
+        show_id,
+        overlapping_requests,
+        workers=args.workers,
+        timeout=args.timeout,
+    )
+    all_outcomes.extend(overlapping_outcomes)
+    print_distribution(overlapping_outcomes)
+    check_all_statuses_are_expected(
+        overlapping_outcomes, {201, 409}, "Overlapping multi-seat requests", failures
+    )
+    overlapping_successes = [
+        outcome
+        for outcome in overlapping_outcomes
+        if outcome.status == 201 and outcome.body is not None
+    ]
+    if len(overlapping_successes) != 1:
+        failures.append("Overlapping multi-seat requests must have exactly one winner")
+    elif len(overlapping_successes[0].body.get("seats", [])) != 2:
+        failures.append("Overlapping multi-seat conflict partially reserved its requested seats")
+
+    opposite_order_requests = [
+        (
+            tokens[order_users[0]],
+            ["ORDER-A", "ORDER-B"],
+            f"order-{uuid.uuid4()}",
+        ),
+        (
+            tokens[order_users[1]],
+            ["ORDER-B", "ORDER-A"],
+            f"order-{uuid.uuid4()}",
+        ),
+    ]
+    print("Opposite-order multi-seat requests:")
+    opposite_order_outcomes = run_burst(
+        args.base_url,
+        show_id,
+        opposite_order_requests,
+        workers=args.workers,
+        timeout=args.timeout,
+    )
+    all_outcomes.extend(opposite_order_outcomes)
+    print_distribution(opposite_order_outcomes)
+    check_all_statuses_are_expected(
+        opposite_order_outcomes, {201, 409}, "Opposite-order requests", failures
+    )
+    if sorted(outcome.status for outcome in opposite_order_outcomes) != [201, 409]:
+        failures.append("Opposite-order requests must finish with one success and one conflict")
+    opposite_order_successes = [
+        outcome
+        for outcome in opposite_order_outcomes
+        if outcome.status == 201 and outcome.body is not None
+    ]
+    if (
+        len(opposite_order_successes) == 1
+        and len(opposite_order_successes[0].body.get("seats", [])) != 2
+    ):
+        failures.append("Opposite-order conflict partially reserved its requested seats")
+
+    start_immediately = threading.Event()
+    start_immediately.set()
+    initial_cancel = reserve(
+        args.base_url,
+        show_id,
+        tokens[cancellation_owner],
+        "CANCEL-SEAT",
+        f"cancel-initial-{uuid.uuid4()}",
+        args.timeout,
+        start_immediately,
+    )
+    cancelled_reservation_ids: set[str] = set()
+    if initial_cancel.status == 201 and initial_cancel.body is not None:
+        all_outcomes.append(initial_cancel)
+        reservation_id = initial_cancel.body.get("reservation_id")
+        if not isinstance(reservation_id, str):
+            failures.append("Cancellation race setup omitted reservation_id")
+        else:
+            print("Cancellation racing with a competing reservation:")
+            cancellation_outcome, competing_outcome = run_cancel_reservation_race(
+                args.base_url,
+                show_id,
+                reservation_id,
+                tokens[cancellation_owner],
+                tokens[cancellation_competitor],
+                "CANCEL-SEAT",
+                args.timeout,
+            )
+            print("  cancel request:")
+            print_distribution([cancellation_outcome])
+            print("  competing reserve request:")
+            print_distribution([competing_outcome])
+            all_outcomes.extend([cancellation_outcome, competing_outcome])
+            if cancellation_outcome.status != 200:
+                failures.append(
+                    "Cancellation race must return HTTP 200, "
+                    f"got {cancellation_outcome.status}"
+                )
+            elif (
+                cancellation_outcome.body is None
+                or cancellation_outcome.body.get("status") != "CANCELLED"
+            ):
+                failures.append("Cancellation race did not report CANCELLED")
+            else:
+                cancelled_reservation_ids.add(reservation_id)
+            if competing_outcome.status not in {201, 409}:
+                failures.append(
+                    "Competing reservation must return HTTP 201 or 409, "
+                    f"got {competing_outcome.status}"
+                )
+    else:
+        all_outcomes.append(initial_cancel)
+        failures.append(
+            "Cancellation race setup failed to reserve its seat: "
+            f"HTTP {initial_cancel.status}"
+        )
+
     print("Overall reservation outcomes:")
     print_distribution(all_outcomes)
 
@@ -442,6 +643,8 @@ def main() -> int:
             continue
         response_user = outcome.body.get("user_id")
         reservation_id = outcome.body.get("reservation_id")
+        if reservation_id in cancelled_reservation_ids:
+            continue
         response_seats = outcome.body.get("seats")
         if not isinstance(response_user, int) or not isinstance(reservation_id, str):
             failures.append("A successful reservation response omitted user_id or reservation_id")
@@ -471,6 +674,23 @@ def main() -> int:
         )
     if state_by_seat.get("RETRY-ALTERNATE") != "AVAILABLE":
         failures.append("Different-body idempotency conflict unexpectedly reserved its seat")
+    if "CANCEL-SEAT" in state_by_seat:
+        expected_cancel_race_state = (
+            "CONFIRMED"
+            if any(
+                outcome.status == 201
+                and outcome.body is not None
+                and "CANCEL-SEAT" in outcome.body.get("seats", [])
+                and outcome.body.get("reservation_id") not in cancelled_reservation_ids
+                for outcome in all_outcomes
+            )
+            else "AVAILABLE"
+        )
+        if state_by_seat["CANCEL-SEAT"] != expected_cancel_race_state:
+            failures.append(
+                "Cancellation race seat has an invalid final state: "
+                f"expected {expected_cancel_race_state}, got {state_by_seat['CANCEL-SEAT']}"
+            )
     if len(seat_states) != total:
         failures.append(f"Seat list has {len(seat_states)} entries but total_seats is {total}")
 
