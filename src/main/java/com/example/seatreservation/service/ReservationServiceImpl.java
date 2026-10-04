@@ -17,6 +17,9 @@ import com.example.seatreservation.dto.ReserveSeatsRequest;
 import com.example.seatreservation.entity.IdempotencyKey;
 import com.example.seatreservation.entity.Reservation;
 import com.example.seatreservation.exception.IdempotencyConflictException;
+import com.example.seatreservation.exception.PerUserLimitExceededException;
+import com.example.seatreservation.exception.SeatAlreadyTakenException;
+import com.example.seatreservation.logging.ReservationEventLogger;
 import com.example.seatreservation.metrics.ReservationMetrics;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
@@ -36,6 +39,7 @@ public class ReservationServiceImpl implements ReservationService {
     private final ShowRepository showRepository;
     private final ReservationTransaction reservationTransaction;
     private final ReservationMetrics reservationMetrics;
+    private final ReservationEventLogger reservationEventLogger;
 
     public ReservationServiceImpl(
             AuthenticatedUser authenticatedUser,
@@ -45,7 +49,8 @@ public class ReservationServiceImpl implements ReservationService {
             SeatRepository seatRepository,
             ShowRepository showRepository,
             ReservationTransaction reservationTransaction,
-            ReservationMetrics reservationMetrics) {
+            ReservationMetrics reservationMetrics,
+            ReservationEventLogger reservationEventLogger) {
         this.authenticatedUser = authenticatedUser;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
         this.reservationRepository = reservationRepository;
@@ -54,6 +59,7 @@ public class ReservationServiceImpl implements ReservationService {
         this.showRepository = showRepository;
         this.reservationTransaction = reservationTransaction;
         this.reservationMetrics = reservationMetrics;
+        this.reservationEventLogger = reservationEventLogger;
     }
 
     @Override
@@ -61,8 +67,22 @@ public class ReservationServiceImpl implements ReservationService {
         String requestHash = requestHash(request.seats());
         try {
             return reservationTransaction.create(showPublicId, request, requestHash);
+        } catch (SeatAlreadyTakenException exception) {
+            reservationEventLogger.declined(showPublicId, "seat_taken");
+            throw exception;
+        } catch (PerUserLimitExceededException exception) {
+            reservationEventLogger.declined(showPublicId, "per_user_limit");
+            throw exception;
+        } catch (IdempotencyConflictException exception) {
+            reservationEventLogger.declined(showPublicId, "idempotency_conflict");
+            throw exception;
         } catch (DataIntegrityViolationException exception) {
-            return recoverIdempotencyRace(showPublicId, request, requestHash, exception);
+            try {
+                return recoverIdempotencyRace(showPublicId, request, requestHash, exception);
+            } catch (IdempotencyConflictException conflict) {
+                reservationEventLogger.declined(showPublicId, "idempotency_conflict");
+                throw conflict;
+            }
         }
     }
 

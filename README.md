@@ -51,6 +51,16 @@ Spring Boot Actuator health checks are also enabled at `/actuator/health`, inclu
 `/actuator/health/liveness` and `/actuator/health/readiness` probe groups. Readiness includes
 the PostgreSQL health indicator.
 
+## Structured request logging
+
+Application logs are emitted as JSON to standard output. Each HTTP request accepts a
+safe `X-Request-ID` value or receives a generated UUID; the selected ID is returned in the
+response header and included in the JSON request-completion log. Request logs include the
+HTTP method, path (without query parameters), response status, and duration in milliseconds.
+Reservation confirmation, cancellation, replay, and decline events add the show and reservation
+IDs when available. Authentication headers, JWTs, request bodies, and user identifiers are
+never logged.
+
 ## Prometheus metrics
 
 Micrometer metrics are exposed at `GET /actuator/prometheus`. The endpoint includes

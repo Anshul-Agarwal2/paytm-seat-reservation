@@ -4,6 +4,8 @@ import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.example.seatreservation.dto.CancellationResponse;
 import com.example.seatreservation.entity.ReservationStatus;
@@ -11,6 +13,7 @@ import com.example.seatreservation.entity.SeatStatus;
 import com.example.seatreservation.exception.ReservationNotCancellableException;
 import com.example.seatreservation.exception.ReservationNotFoundException;
 import com.example.seatreservation.exception.ReservationOwnershipException;
+import com.example.seatreservation.logging.ReservationEventLogger;
 import com.example.seatreservation.repository.ReservationRepository;
 import com.example.seatreservation.repository.SeatRepository;
 import com.example.seatreservation.repository.ShowRepository;
@@ -23,16 +26,19 @@ public class ReservationCancellationService {
     private final ReservationRepository reservationRepository;
     private final ShowRepository showRepository;
     private final SeatRepository seatRepository;
+    private final ReservationEventLogger reservationEventLogger;
 
     public ReservationCancellationService(
             AuthenticatedUser authenticatedUser,
             ReservationRepository reservationRepository,
             ShowRepository showRepository,
-            SeatRepository seatRepository) {
+            SeatRepository seatRepository,
+            ReservationEventLogger reservationEventLogger) {
         this.authenticatedUser = authenticatedUser;
         this.reservationRepository = reservationRepository;
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
+        this.reservationEventLogger = reservationEventLogger;
     }
 
     @Transactional
@@ -41,7 +47,7 @@ public class ReservationCancellationService {
         var reservation = reservationRepository.findByPublicId(reservationPublicId)
                 .orElseThrow(() -> new ReservationNotFoundException(reservationPublicId));
 
-        showRepository.findByIdForUpdate(reservation.getShowId())
+        var show = showRepository.findByIdForUpdate(reservation.getShowId())
                 .orElseThrow(() -> new IllegalStateException(
                         "Reservation references a missing show"));
         reservation = reservationRepository.findByPublicIdForUpdate(reservationPublicId)
@@ -51,6 +57,7 @@ public class ReservationCancellationService {
             throw new ReservationOwnershipException();
         }
         if (reservation.getStatus() == ReservationStatus.CANCELLED) {
+            reservationEventLogger.cancellationReplayed(show.getPublicId(), reservation.getPublicId());
             return new CancellationResponse(reservation.getPublicId(), reservation.getStatus());
         }
         if (reservation.getStatus() != ReservationStatus.CONFIRMED) {
@@ -77,6 +84,14 @@ public class ReservationCancellationService {
         reservation.setStatus(ReservationStatus.CANCELLED);
         seatRepository.saveAllAndFlush(seats);
         reservationRepository.flush();
+        UUID showPublicId = show.getPublicId();
+        UUID reservationPublicId = reservation.getPublicId();
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                reservationEventLogger.cancelled(showPublicId, reservationPublicId);
+            }
+        });
         return new CancellationResponse(reservation.getPublicId(), reservation.getStatus());
     }
 }

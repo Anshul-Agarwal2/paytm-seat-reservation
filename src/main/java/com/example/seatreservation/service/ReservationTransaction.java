@@ -9,6 +9,8 @@ import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.example.seatreservation.dto.ReservationResponse;
 import com.example.seatreservation.dto.ReserveSeatsRequest;
@@ -23,6 +25,7 @@ import com.example.seatreservation.exception.PerUserLimitExceededException;
 import com.example.seatreservation.exception.SeatAlreadyTakenException;
 import com.example.seatreservation.exception.SeatNotFoundException;
 import com.example.seatreservation.exception.ShowNotFoundException;
+import com.example.seatreservation.logging.ReservationEventLogger;
 import com.example.seatreservation.metrics.ReservationMetrics;
 import com.example.seatreservation.repository.IdempotencyKeyRepository;
 import com.example.seatreservation.repository.ReservationRepository;
@@ -41,6 +44,7 @@ public class ReservationTransaction {
     private final ReservationSeatRepository reservationSeatRepository;
     private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final ReservationMetrics reservationMetrics;
+    private final ReservationEventLogger reservationEventLogger;
 
     public ReservationTransaction(
             AuthenticatedUser authenticatedUser,
@@ -49,7 +53,8 @@ public class ReservationTransaction {
             ReservationRepository reservationRepository,
             ReservationSeatRepository reservationSeatRepository,
             IdempotencyKeyRepository idempotencyKeyRepository,
-            ReservationMetrics reservationMetrics) {
+            ReservationMetrics reservationMetrics,
+            ReservationEventLogger reservationEventLogger) {
         this.authenticatedUser = authenticatedUser;
         this.showRepository = showRepository;
         this.seatRepository = seatRepository;
@@ -57,6 +62,7 @@ public class ReservationTransaction {
         this.reservationSeatRepository = reservationSeatRepository;
         this.idempotencyKeyRepository = idempotencyKeyRepository;
         this.reservationMetrics = reservationMetrics;
+        this.reservationEventLogger = reservationEventLogger;
     }
 
     @Transactional
@@ -75,7 +81,15 @@ public class ReservationTransaction {
                 userId, showId, request.idempotencyKey());
         if (existing.isPresent()) {
             reservationMetrics.recordIdempotentReplayAfterCommit();
-            return replayOrConflict(existing.get(), requestHash, showPublicId);
+            ReservationResponse replay = replayOrConflict(existing.get(), requestHash, showPublicId);
+            UUID reservationPublicId = replay.reservationId();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    reservationEventLogger.replayed(showPublicId, reservationPublicId);
+                }
+            });
+            return replay;
         }
 
         List<String> requestedSeats = request.seats().stream().sorted().toList();
@@ -117,6 +131,13 @@ public class ReservationTransaction {
                 reservation.getId()));
 
         reservationMetrics.recordConfirmedAfterCommit();
+        UUID reservationPublicId = reservation.getPublicId();
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                reservationEventLogger.confirmed(showPublicId, reservationPublicId);
+            }
+        });
         return ReservationServiceImpl.response(reservation, showPublicId, requestedSeats);
     }
 
