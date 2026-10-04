@@ -41,6 +41,30 @@ Prerequisites: Docker Compose, Java 21 or later, and Maven.
 Flyway is enabled and applies versioned migrations from `classpath:db/migration`. Hibernate
 schema generation is set to `validate`, so it checks the schema without creating tables.
 
+## Building and running the application container
+
+Build the multi-stage image from the repository root:
+
+```powershell
+docker build -t seat-reservation:local .
+```
+
+Run it with deployment-provided environment variables (do not bake credentials into the image):
+
+```powershell
+docker run --rm -p 8080:8080 `
+  -e DATABASE_URL="jdbc:postgresql://<database-host>:5432/<database-name>" `
+  -e DATABASE_USERNAME="<database-user>" `
+  -e DATABASE_PASSWORD="<database-password>" `
+  -e JWT_SECRET="<strong-secret-of-at-least-32-bytes>" `
+  seat-reservation:local
+```
+
+The database host must be reachable from inside the container. The image uses a minimal
+Distroless Java 21 runtime as a non-root user, exposes port 8080, and sets container-aware JVM
+heap limits. Configure orchestrator liveness and readiness probes with `/health/live` and
+`/health/ready`; PostgreSQL credentials and the JWT signing secret are supplied only at runtime.
+
 ## Health endpoints
 
 `GET /health/live` reports whether the application process is running and does not query

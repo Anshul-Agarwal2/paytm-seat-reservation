@@ -85,11 +85,11 @@ public class ReservationCancellationService {
         seatRepository.saveAllAndFlush(seats);
         reservationRepository.flush();
         UUID showPublicId = show.getPublicId();
-        UUID reservationPublicId = reservation.getPublicId();
+        UUID cancelledReservationPublicId = reservation.getPublicId();
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                reservationEventLogger.cancelled(showPublicId, reservationPublicId);
+                reservationEventLogger.cancelled(showPublicId, cancelledReservationPublicId);
             }
         });
         return new CancellationResponse(reservation.getPublicId(), reservation.getStatus());
